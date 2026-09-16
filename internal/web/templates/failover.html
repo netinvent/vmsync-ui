@@ -1,0 +1,365 @@
+{{template "head" .}}
+{{$v := .Failover}}
+{{$user := .User}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
+
+<div class="verdict">
+  {{if $v.UrgentCount}}
+    <span class="count s-crit">{{$v.UrgentCount}} needing attention now</span>
+    {{if $v.SplitBrainCount}}
+      <span class="note">
+        {{$v.SplitBrainCount}} running in two places — two live copies diverge from the moment the second starts.
+      </span>
+    {{end}}
+    {{if $v.FenceFailedCount}}
+      <span class="note">
+        {{$v.FenceFailedCount}} where a fence was attempted and did not stop the VM. Nothing will retry it.
+      </span>
+    {{end}}
+  {{else if $v.Rows}}
+    <span class="all-well">No VM is running in two places.</span>
+  {{end}}
+  {{if $v.Pending}}<span class="count s-warn">{{$v.Pending}} awaiting an agent</span>{{end}}
+  <span class="asof">operations expire after {{$v.TTLMinutes}} minutes</span>
+</div>
+
+<section class="panel">
+  <div class="head">
+    <h2>Replication pairs</h2>
+    <span class="note">
+      Only the actions each VM's current state allows are offered. vmsync and the agent check
+      again independently — this is so the wrong one is not there to click, not a substitute
+      for their refusals.
+    </span>
+  </div>
+
+  {{if $v.Rows}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>VM</th><th>Pairs with</th><th>Storage</th>
+          {{if $user.IsAdmin}}<th>Failover actions</th>{{end}}
+        </tr>
+      </thead>
+      <tbody>
+        {{range $v.Rows}}
+        {{$r := .}}
+        <tr {{if or .SplitBrain .FenceFailed}}class="crit-row"{{end}}>
+
+          <td class="mono">
+            {{.VM}}
+            {{if .Role}}<span class="pill {{statusClass .Role}}">{{.Role}}</span>{{end}}
+            {{if .WasFenced}}<span class="pill s-admin">fenced</span>{{end}}
+            {{if .FenceFailed}}<span class="pill s-crit">fence failed</span>{{end}}
+            {{if .Active}}<span class="pill s-ok">running</span>{{else}}<span class="pill s-none">stopped</span>{{end}}
+            <div class="warnline">{{.Hostname}}</div>
+            {{if .AgentStale}}<div class="warnline">agent stale — an action will not arrive until it checks in</div>{{end}}
+            {{if .PromotedAt}}<div class="warnline">promoted {{.PromotedAt}}{{if .PromotedBy}} by {{.PromotedBy}}{{end}}{{if .PromotionMode}} ({{.PromotionMode}}){{end}}</div>{{end}}
+            {{if .WasRestored}}
+              <div class="warnline">
+                rolled back to restore point {{.RestoredFrom}}{{if .RestoredAt}} on {{.RestoredAt}}{{end}}{{if .RestoredBy}} by {{.RestoredBy}}{{end}}.
+                Its contents are that copy, not the last sync{{if .ContentsAsOf}} — as of {{.ContentsAsOf}}{{end}}.
+              </div>
+            {{else if .ContentsAsOf}}
+              <div class="note">contents as of {{.ContentsAsOf}}</div>
+            {{end}}
+            {{if .ArmedFenceSource}}
+              <div class="warnline">
+                armed a fence against {{.ArmedFenceSource}}{{if .ArmedFenceAt}} at {{.ArmedFenceAt}}{{end}}{{if .ArmedFenceArmedBy}} by {{.ArmedFenceArmedBy}}{{end}}
+              </div>
+            {{end}}
+            {{with .Fenced}}
+              <div class="warnline">
+                {{if eq .State "done"}}
+                  stopped by vmsync{{if $r.FencedAt}} at {{$r.FencedAt}}{{end}} — {{.PeerRef}} was promoted{{if .ArmedBy}} by {{.ArmedBy}}{{end}}.
+                  This is not an administrative pause.
+                {{else}}
+                  a fence for {{.PeerRef}} was attempted{{if $r.FencedAt}} at {{$r.FencedAt}}{{end}} and did not stop this domain.
+                  It will NOT be retried automatically{{if .Error}} ({{.Error}}){{end}}.
+                {{end}}
+              </div>
+            {{end}}
+          </td>
+
+          <td class="mono">
+            {{if .PeerRef}}
+              {{.PeerRef}}
+              {{if .PeerSeen}}
+                {{if .PeerRole}}<span class="pill {{statusClass .PeerRole}}">{{.PeerRole}}</span>{{end}}
+                {{if .PeerActive}}<span class="pill s-ok">running</span>{{else}}<span class="pill s-none">stopped</span>{{end}}
+              {{else}}
+                <div class="warnline">no agent reports this host — its state is unknown here</div>
+              {{end}}
+              {{if .SplitBrain}}
+                <div class="warnline">SPLIT BRAIN — both copies are running and accepting writes</div>
+              {{end}}
+            {{else}}
+              <span class="note">—</span>
+            {{end}}
+          </td>
+
+          <td class="num">
+            {{if .StorageKnown}}
+              {{.Allocated}}
+              <div class="warnline">{{.Free}} free</div>
+              {{if not .KeepingOldDisksFits}}
+                <div class="warnline">not enough room to keep the old copy on an inversion</div>
+              {{end}}
+            {{else}}
+              <span class="note">—</span>
+            {{end}}
+          </td>
+
+          {{if $user.IsAdmin}}
+          <td>
+            {{if .CanPromote}}
+            <details class="act">
+              <summary>{{if .PromoteFinishesAStalledFailover}}Finish the failover — start it…{{else}}Promote…{{end}}</summary>
+              <form method="post" action="/failover/operation" class="inline">
+                {{if .PromoteFinishesAStalledFailover}}
+                <div class="note">
+                  This was promoted at {{.PromotedAt}} but never started, so nothing is serving it.
+                  Going ahead starts it and leaves the original promotion record — its time, its
+                  actor and its mode — exactly as it is.
+                </div>
+                {{end}}
+                <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+                <input type="hidden" name="kind" value="promote">
+                <input type="hidden" name="agent_id" value="{{.AgentID}}">
+                <input type="hidden" name="vm" value="{{.VM}}">
+                <input type="hidden" name="peer_host" value="{{.PeerHost}}">
+                <input type="hidden" name="peer_vm" value="{{.PeerVM}}">
+
+                <label class="cell">
+                  <span>mode</span>
+                  <select name="mode">
+                    <option value="forced">forced — the source was never reached</option>
+                    <option value="planned">planned — the source was shut down first</option>
+                  </select>
+                </label>
+
+                <label class="cell check"><span>start it</span><input type="checkbox" name="start" checked></label>
+                <label class="cell check"><span>force</span><input type="checkbox" name="force"></label>
+                <label class="cell check"><span>stop the old source</span><input type="checkbox" name="arm_fence"></label>
+
+                <button class="danger">{{if .PromoteFinishesAStalledFailover}}Start {{.VM}}{{else}}Promote {{.VM}}{{end}}</button>
+                <div class="note">
+                  <strong>force</strong> promotes even when this does not look like a usable replica; the
+                  data-loss window is then reported as unknown rather than guessed.
+                  <strong>stop the old source</strong> arms a fence, so {{if .PeerRef}}{{.PeerRef}}{{else}}the displaced source{{end}}
+                  shuts itself down when its agent next checks — leave it off for a drill.
+                </div>
+              </form>
+            </details>
+            {{end}}
+
+            {{if .CanInvert}}
+            <form method="post" action="/failover/operation" class="inline">
+              <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+              <input type="hidden" name="kind" value="invert">
+              <input type="hidden" name="agent_id" value="{{.AgentID}}">
+              <input type="hidden" name="vm" value="{{.VM}}">
+              <input type="hidden" name="peer_host" value="{{.PeerHost}}">
+              <input type="hidden" name="peer_vm" value="{{.PeerVM}}">
+              <button>Invert — make {{.PeerRef}} the source</button>
+            </form>
+            {{end}}
+
+            {{if .CanShutdown}}
+            <form method="post" action="/failover/operation" class="inline">
+              <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+              <input type="hidden" name="kind" value="shutdown-domain">
+              <input type="hidden" name="agent_id" value="{{.AgentID}}">
+              <input type="hidden" name="vm" value="{{.VM}}">
+              <button class="danger">Shut down cleanly</button>
+            </form>
+            {{end}}
+
+            {{if .CanRestore}}
+            <details class="act">
+              <summary>Roll back…</summary>
+              <form method="post" action="/failover/operation" class="inline">
+                <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+                <input type="hidden" name="kind" value="restore">
+                <input type="hidden" name="agent_id" value="{{.AgentID}}">
+                <input type="hidden" name="vm" value="{{.VM}}">
+                <input type="hidden" name="peer_host" value="{{.PeerHost}}">
+                <input type="hidden" name="peer_vm" value="{{.PeerVM}}">
+
+                <div class="note">
+                  <strong>This replaces {{.VM}}'s disks and cannot be undone from here.</strong>
+                  Its current contents are kept on the target as
+                  <code>&lt;disk&gt;.vmsync-replaced-&lt;time&gt;</code> files, which nothing removes for you.
+                </div>
+                <div class="note">
+                  A rollback is for <strong>promoting</strong>, not for carrying on replicating: the next
+                  sync from {{if .PeerRef}}{{.PeerRef}}{{else}}the source{{end}} would put back exactly what
+                  you rolled away from. So replication into {{.VM}} is left <strong>paused</strong> and its
+                  schedule is switched off. To go back to replicating afterwards, set its role to
+                  <em>target</em> and then run a full resync from the source — which rebuilds it and
+                  discards what you restored.
+                </div>
+
+                <label class="cell">
+                  <span>roll back to</span>
+                  <select name="tag">
+                    {{range .RestorePointViews}}
+                    <option value="{{.Tag}}">{{.TakenAt}} — {{.Age}}{{if .Incomplete}} — record unreadable{{else}} — {{.Verify}}{{end}}</option>
+                    {{end}}
+                  </select>
+                </label>
+
+                <button class="danger">Roll {{.VM}} back</button>
+
+                <div class="note">
+                  What each copy's state means:
+                  <ul>
+                    {{range .RestorePointViews}}
+                    <li><code>{{.TakenAt}}</code> — {{.Caveat}}{{if .Disks}}; {{.Disks}} disk{{if ne .Disks 1}}s{{end}}{{end}}</li>
+                    {{end}}
+                  </ul>
+                </div>
+              </form>
+            </details>
+            {{end}}
+
+            {{if .CanReinit}}
+            <details class="act">
+              <summary>Full resync…</summary>
+              <form method="post" action="/failover/operation" class="inline">
+                <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+                <input type="hidden" name="kind" value="reinit">
+                <input type="hidden" name="agent_id" value="{{.AgentID}}">
+                <input type="hidden" name="vm" value="{{.VM}}">
+                <div class="note">
+                  Copies {{.VM}} to {{if .PeerRef}}{{.PeerRef}}{{else}}its target{{end}} from scratch, discarding
+                  whatever the replica currently holds, and re-enables its schedule when it succeeds.
+                  <strong>This is how you go back to replicating after a rollback</strong> — set the replica's
+                  role to <em>target</em> first, or it will refuse to accept the copy.
+                </div>
+                <button class="danger">Resync {{.VM}} in full</button>
+              </form>
+            </details>
+            {{end}}
+
+            {{if .CanForceClean}}
+            <details class="act">
+              <summary>Force clean resync…</summary>
+              <form method="post" action="/failover/operation" class="inline">
+                <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+                <input type="hidden" name="kind" value="force-clean">
+                <input type="hidden" name="agent_id" value="{{.AgentID}}">
+                <input type="hidden" name="vm" value="{{.VM}}">
+                <div class="note">
+                  <strong>Use this only when a full resync will not go through.</strong> It does everything
+                  a full resync does, and additionally <strong>undefines the target domain</strong> on
+                  {{if .PeerRef}}{{.PeerRef}}{{else}}the far end{{end}} and ignores the interlocks that
+                  protect a <em>promoted</em> or <em>paused</em> replica from being overwritten. Anything
+                  the replica holds that the source does not — a promotion's worth of writes, its restore
+                  points — is gone. It will still refuse a replica that is <em>running</em>: shut it down
+                  first.
+                </div>
+                <button class="danger">Force clean and resync {{.VM}}</button>
+              </form>
+            </details>
+            {{end}}
+
+            {{if .CanSetRole}}
+            <details class="act">
+              <summary>Set role…</summary>
+              <form method="post" action="/failover/operation" class="inline">
+                <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+                <input type="hidden" name="kind" value="set-role">
+                <input type="hidden" name="agent_id" value="{{.AgentID}}">
+                <input type="hidden" name="vm" value="{{.VM}}">
+                <label class="cell">
+                  <span>role</span>
+                  <select name="role">
+                    <option value="target">target — a normal replica again</option>
+                    <option value="source">source — the primary of its pair</option>
+                    <option value="paused">paused — replication suspended</option>
+                  </select>
+                </label>
+                <button>Set role</button>
+                <div class="note">
+                  The way back. A VM a fence stopped is <em>paused</em>: set it to
+                  <em>target</em> to let it receive again, or <em>source</em> to make it primary.
+                  Promotion is not here on purpose — it verifies the replica first.
+                </div>
+              </form>
+            </details>
+            {{end}}
+          </td>
+          {{end}}
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+    <p class="empty">
+      {{if $v.NoAgents}}
+        No agents are enrolled yet, so nothing has reported a replication pair.
+      {{else}}
+        No agent reports a VM with a replication relationship. Run one sync by hand first —
+        vmsync records the pair in each domain's own metadata, and that is what this page reads.
+      {{end}}
+    </p>
+  {{end}}
+</section>
+
+<section class="panel">
+  <div class="head">
+    <h2>Operations</h2>
+    <span class="note">
+      One at a time per VM: a second is refused while one is in flight. Cancelling stops an
+      operation being published — it does not undo one an agent has already run.
+      {{if $v.OlderHidden}}
+        Showing everything still awaiting an agent and the most recent finished ones;
+        {{$v.OlderHidden}} older are not listed. The audit page keeps all of them.
+      {{end}}
+    </span>
+  </div>
+
+  {{if $v.Operations}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>When</th><th>What</th><th>VM</th><th>By</th><th>State</th>{{if $user.IsAdmin}}<th></th>{{end}}</tr>
+      </thead>
+      <tbody>
+        {{range $v.Operations}}
+        <tr>
+          <td>{{.Created}}<div class="warnline">{{.Age}} ago</div></td>
+          <td class="mono">{{.Kind}}</td>
+          <td class="mono">{{.VM}}</td>
+          <td>{{.CreatedBy}}</td>
+          <td>
+            <span class="pill {{.StateClass}}">{{.State}}</span>
+            {{if .Detail}}<div class="warnline">{{.Detail}}</div>{{end}}
+          </td>
+          {{if $user.IsAdmin}}
+          <td>
+            {{if .Pending}}
+            <form method="post" action="/failover/cancel" class="inline">
+              <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <button class="quiet">Cancel</button>
+            </form>
+            {{end}}
+          </td>
+          {{end}}
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+    <p class="empty">Nothing has been issued from this console.</p>
+  {{end}}
+</section>
+
+{{template "foot" .}}

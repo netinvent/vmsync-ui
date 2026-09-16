@@ -1,0 +1,333 @@
+/* vmsync-ui — an operations console, scanned rather than read.
+   Dense tables, monospace for anything an operator would copy, semantic
+   colour kept separate from the accent so status never competes with
+   decoration. */
+
+:root {
+  --bg:        #f6f7f9;
+  --surface:   #ffffff;
+  --surface-2: #eef1f4;
+  --ink:       #16202b;
+  --ink-soft:  #4a5866;
+  --muted:     #6b7885;
+  --rule:      #d7dee5;
+  --accent:    #2d6fa8;
+
+  /* Semantic, deliberately not the accent. */
+  --ok:        #2f7148;
+  --ok-bg:     #e3f0e8;
+  --warn:      #8a5a10;
+  --warn-bg:   #fbeed5;
+  --crit:      #a8331f;
+  --crit-bg:   #f8e3df;
+  --admin:     #3c5a99;
+  --admin-bg:  #e5ebf7;
+  --none:      #5f6b77;
+  --none-bg:   #e8ecef;
+
+  --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #0f151b;
+    --surface:   #161f28;
+    --surface-2: #1d2833;
+    --ink:       #dde5ec;
+    --ink-soft:  #b0bcc8;
+    --muted:     #8494a1;
+    --rule:      #2a3742;
+    --accent:    #71acdc;
+
+    --ok:        #79b893;  --ok-bg:    #16281d;
+    --warn:      #d9a441;  --warn-bg:  #2b2313;
+    --crit:      #e08a6e;  --crit-bg:  #2e1b16;
+    --admin:     #8fabdd;  --admin-bg: #1a2233;
+    --none:      #93a1ad;  --none-bg:  #1e262e;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+a { color: var(--accent); }
+
+header.top {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand { font-family: var(--mono); font-weight: 600; letter-spacing: -0.01em; }
+
+nav.top { display: flex; gap: 1.1rem; margin-right: auto; }
+nav.top a {
+  text-decoration: none;
+  color: var(--ink-soft);
+  padding-bottom: 2px;
+  border-bottom: 2px solid transparent;
+}
+nav.top a:hover { color: var(--accent); }
+nav.top a.on { color: var(--ink); border-bottom-color: var(--accent); }
+
+.who { font-size: 0.85rem; color: var(--muted); display: flex; align-items: center; gap: 0.75rem; }
+.who .role {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.15em 0.45em;
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+}
+
+main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+
+h1 { font-size: 1.25rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0 0 0.6rem; }
+
+/* --- verdict line: the first thing read ------------------------------- */
+
+.verdict {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+}
+.verdict .all-well { font-size: 1.05rem; }
+.verdict .asof { margin-left: auto; font-size: 0.78rem; color: var(--muted); font-family: var(--mono); }
+
+.count {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  padding: 0.3em 0.6em;
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.count.s-ok    { background: var(--ok-bg);    color: var(--ok); }
+.count.s-warn  { background: var(--warn-bg);  color: var(--warn); }
+.count.s-crit  { background: var(--crit-bg);  color: var(--crit); }
+.count.s-admin { background: var(--admin-bg); color: var(--admin); }
+.count.s-none  { background: var(--none-bg);  color: var(--none); }
+
+/* --- panels and tables ------------------------------------------------- */
+
+section.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  overflow: hidden;
+}
+section.panel > .head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+section.panel > .head .note { font-size: 0.82rem; color: var(--muted); }
+section.panel > .body { padding: 1.25rem; }
+
+/* Loud on purpose: an unprotected VM is invisible in a green board unless
+   something makes it not be. */
+section.panel.alarm { border-color: var(--crit); }
+section.panel.alarm > .head { background: var(--crit-bg); color: var(--crit); }
+
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+td {
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.mono, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.22em 0.5em;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.pill.s-ok    { background: var(--ok-bg);    color: var(--ok); }
+.pill.s-warn  { background: var(--warn-bg);  color: var(--warn); }
+.pill.s-crit  { background: var(--crit-bg);  color: var(--crit); }
+.pill.s-admin { background: var(--admin-bg); color: var(--admin); }
+.pill.s-none  { background: var(--none-bg);  color: var(--none); }
+
+/* Reasons sit on the row rather than behind a click: the difference
+   between a board you act on and one you then go investigate. */
+.reasons { margin: 0.35rem 0 0; padding-left: 1rem; color: var(--ink-soft); font-size: 0.84rem; }
+.reasons li { margin-top: 0.15rem; }
+
+.warnline { color: var(--warn); font-size: 0.82rem; }
+.empty { color: var(--muted); font-style: italic; }
+
+/* --- forms ------------------------------------------------------------- */
+
+form.inline { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+
+input[type=text], input[type=password] {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  min-width: 14rem;
+}
+button {
+  font: inherit;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+button.quiet { background: transparent; color: var(--accent); }
+button.danger { background: transparent; border-color: var(--crit); color: var(--crit); }
+button:hover { filter: brightness(1.08); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.flash, .token-box {
+  padding: 0.85rem 1.25rem;
+  border-radius: 5px;
+  border: 1px solid var(--rule);
+  background: var(--surface-2);
+  font-size: 0.9rem;
+}
+.token-box code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.92rem;
+  margin-top: 0.5rem;
+  padding: 0.6rem;
+  background: var(--bg);
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.err { color: var(--crit); }
+
+/* --- login ------------------------------------------------------------- */
+
+.login-wrap { max-width: 22rem; margin: 6rem auto; }
+.login-wrap form { display: flex; flex-direction: column; gap: 0.75rem; }
+.login-wrap input { min-width: 0; width: 100%; }
+
+footer.foot {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 1.5rem 3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* --- schedule page ------------------------------------------------------ */
+
+label.cell {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+label.cell input[type=text],
+label.cell input[type=number],
+label.cell select {
+  font: inherit;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink);
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--bg);
+  min-width: 0;
+}
+label.cell input[type=number] { width: 5.5rem; }
+label.cell input[type=text] { width: 12rem; }
+label.cell.check { flex-direction: row; align-items: center; gap: 0.4rem; }
+
+tr td.runline {
+  padding-top: 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.flash.err { border-color: var(--crit); background: var(--crit-bg); color: var(--crit); }
+
+/* Split-brain gets the loudest treatment on the page: a full-width bar the
+   eye lands on before the verdict line, because a green board with this
+   buried inside it is worse than no board at all. */
+section.panel.splitbrain { border-width: 2px; }
+section.panel.splitbrain > .head h2 { font-size: 1.1rem; }
+section.panel.splitbrain > .body p { margin: 0 0 0.6rem; }
+section.panel.splitbrain > .body p.note { margin-bottom: 0; color: var(--muted); font-size: 0.85rem; }
+
+/* A row whose VM is running in two places. Tinted rather than outlined so it
+   reads as one continuous band across every column, which is what makes it
+   findable in a long table without hunting for a marker in one cell. */
+tr.crit-row > td { background: var(--crit-bg); }
+
+/* Failover actions collapse behind a summary so a row stays one line at
+   rest. The dangerous options -- force, and arming a fence -- are therefore
+   never one stray click away, and the explanation of what each does is
+   beside the control rather than in documentation nobody opens mid-incident. */
+details.act { margin: 0 0 0.35rem; }
+details.act > summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.85rem;
+  padding: 0.15rem 0;
+}
+details.act[open] > summary { margin-bottom: 0.4rem; }
+details.act form.inline { flex-wrap: wrap; align-items: flex-end; }
+details.act .note {
+  flex-basis: 100%;
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  max-width: 42rem;
+}

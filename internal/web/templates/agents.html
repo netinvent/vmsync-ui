@@ -1,0 +1,73 @@
+{{template "head" .}}
+
+{{if .NewToken}}
+<div class="token-box">
+  <strong>Enrolment token created.</strong> This is the only time it is shown — it is single-use and
+  expires in 24 hours. Run this on the host, once:
+  <code>vmsync-agent --ui &lt;this UI&gt; --enrol-token {{.NewToken}} --once</code>
+</div>
+{{end}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+{{if .User.IsAdmin}}
+<section class="panel">
+  <div class="head">
+    <h2>Enrol a host</h2>
+    <span class="note">The token is bound to this hostname and can be redeemed once.</span>
+  </div>
+  <div class="body">
+    <form method="post" action="/agents/enrolment-token" class="inline">
+      <input type="hidden" name="csrf" value="{{.User.CSRF}}">
+      <input type="text" name="hostname" placeholder="hypervisor hostname" required>
+      <button type="submit">Create token</button>
+    </form>
+  </div>
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="head">
+    <h2>Agents</h2>
+    <span class="note">One per hypervisor. Revoking cuts a host off immediately; its record is kept so the audit trail still resolves.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Host</th><th>Last report</th><th>Config age</th><th>VMs</th><th>Version</th>
+          {{if .User.IsAdmin}}<th></th>{{end}}
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Agents}}
+        <tr>
+          {{/* The mode pill sits next to the hostname rather than in a column
+               of its own: it is a property of what this agent IS, and it is
+               the one thing on this page that says a green row is not running
+               anything this console publishes. */}}
+          <td class="mono">{{.Hostname}}{{if .Revoked}} <span class="pill s-none">revoked</span>{{end}}{{if .ReadOnly}} <span class="pill s-warn">monitor</span>{{end}}</td>
+          <td class="num">{{.LastSeen}}{{if .Stale}} <span class="pill s-warn">stale</span>{{end}}</td>
+          <td class="num">{{.ConfigAge}}</td>
+          <td class="num">{{.Domains}}</td>
+          <td class="mono">{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+          {{if $.User.IsAdmin}}
+          <td>
+            {{if not .Revoked}}
+            <form method="post" action="/agents/{{.ID}}/revoke" class="inline">
+              <input type="hidden" name="csrf" value="{{$.User.CSRF}}">
+              <button class="danger" type="submit">Revoke</button>
+            </form>
+            {{end}}
+          </td>
+          {{end}}
+        </tr>
+        {{else}}
+        <tr><td colspan="6" class="empty">No agents enrolled yet.</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{{template "foot" .}}

@@ -1,0 +1,15 @@
+# Built binaries
+/vmsync-ui
+/vmsync-ui.exe
+
+# Runtime state: enrolled agents, their token hashes, agent reports and the
+# audit log. Machine-owned, never committed.
+/state/
+/var/
+
+# The real config holds account password hashes and TLS paths. Commit
+# vmsync-ui.conf.example instead.
+/vmsync-ui.conf
+/*.pem
+/*.key
+/*.crt

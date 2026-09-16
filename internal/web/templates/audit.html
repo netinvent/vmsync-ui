@@ -1,0 +1,26 @@
+{{template "head" .}}
+<section class="panel">
+  <div class="head">
+    <h2>Audit</h2>
+    <span class="note">Intent is recorded before the action and the outcome after, so a half-completed action still leaves a trace.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Outcome</th></tr></thead>
+      <tbody>
+        {{range .Audit}}
+        <tr>
+          <td class="mono">{{.AtUnix}}</td>
+          <td>{{.Actor}}</td>
+          <td class="mono">{{.Action}}</td>
+          <td class="mono">{{.Target}}</td>
+          <td>{{if .Outcome}}{{.Outcome}}{{else}}<span class="warnline">started, no outcome recorded</span>{{end}}</td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5" class="empty">Nothing recorded yet.</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{template "foot" .}}

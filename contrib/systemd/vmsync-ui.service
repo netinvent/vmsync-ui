@@ -1,0 +1,48 @@
+[Unit]
+Description=vmsync control-plane UI
+Documentation=https://github.com/netinvent/vmsync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=simple: this does not call sd_notify(). Type=notify would leave
+# systemd waiting for a readiness message that never arrives.
+Type=simple
+ExecStart=/usr/local/bin/vmsync-ui --config /etc/vmsync-ui/vmsync-ui.conf
+
+Restart=always
+RestartSec=10
+# Disable the start limit. systemd's default gives up after 5 restarts in
+# 10s, which for a console that agents depend on reaching is the wrong
+# failure mode -- an unreachable UI should keep trying, not stay down.
+StartLimitIntervalSec=0
+
+# A dedicated unprivileged user. Unlike the agent, this process needs no
+# access to anything on the host beyond its own state and certificates.
+DynamicUser=yes
+StateDirectory=vmsync-ui
+StateDirectoryMode=0700
+
+# Binding below 1024 would need CAP_NET_BIND_SERVICE. Prefer a high port
+# (the default is :8443) and put a reverse proxy in front if you want 443 --
+# but note that any proxy must not buffer responses or impose its own write
+# timeout, or it will sever the agents' long polls.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# Long enough for in-flight long polls to be cut cleanly; agents retry.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,219 @@
+{{template "head" .}}
+{{$d := .Dashboard}}
+
+{{if $d.SplitBrainPossible}}
+<section class="panel">
+  <div class="head">
+    <h2>Promoted, and the old source has gone quiet</h2>
+    <span class="note">Not an alarm. The last thing heard from the source was that it was running.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>VM</th><th>Promoted copy</th><th>Original source</th><th>Last heard from source</th></tr></thead>
+      <tbody>
+        {{range $d.SplitBrainPossible}}
+        <tr>
+          <td class="mono">{{.TargetVM}}</td>
+          <td class="mono">{{.TargetHost}} <span class="pill s-admin">promoted, running</span></td>
+          <td class="mono">{{.SourceHost}}</td>
+          <td class="num">{{.SourceLastSeen}} ago</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <div class="body">
+    <p class="note">
+      This is what a correct failover of a genuinely dead primary looks like, so it is
+      reported rather than alarmed on. It becomes an alarm only if that host starts
+      reporting again with the VM still running.
+    </p>
+  </div>
+</section>
+{{end}}
+
+{{if $d.SplitBrain}}
+<section class="panel alarm splitbrain">
+  <div class="head">
+    <h2>Both ends are running</h2>
+    <span class="note">Two live copies of one VM. They have been diverging since the second one started.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>VM</th><th>Promoted copy</th><th>Original source</th><th>Last replicated</th></tr></thead>
+      <tbody>
+        {{range $d.SplitBrain}}
+        <tr>
+          <td class="mono">{{.TargetVM}}</td>
+          <td class="mono">{{.TargetHost}} <span class="pill s-admin">promoted, running</span></td>
+          <td class="mono">{{.SourceHost}} <span class="pill s-crit">still running</span></td>
+          <td class="num">{{.AgeString}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <div class="body">
+    <p>
+      Replication into the promoted copy is already refused by vmsync itself, so neither
+      side is overwriting the other — but both are accepting writes, and only one set can
+      be kept. Decide which, then stop the other.
+    </p>
+    <p class="note">
+      This console cannot stop a VM, and it did not cause this: a forced promotion during a
+      partition promotes a replica without being able to reach — let alone fence — the
+      original. What it can do is be the one place that hears from both hosts and says so.
+    </p>
+  </div>
+</section>
+{{end}}
+
+<div class="verdict">
+  {{if and (not (index $d.Counts "critical")) (not (index $d.Counts "warning")) (not (index $d.Counts "unreplicated"))}}
+    <span class="all-well">Every replicated VM is current, and every VM is replicated.</span>
+  {{else}}
+    {{with index $d.Counts "critical"}}<span class="count s-crit">{{.}} critical</span>{{end}}
+    {{with index $d.Counts "warning"}}<span class="count s-warn">{{.}} warning</span>{{end}}
+    {{with index $d.Counts "unreplicated"}}<span class="count s-none">{{.}} unprotected</span>{{end}}
+    {{with index $d.Counts "promoted"}}<span class="count s-admin">{{.}} promoted</span>{{end}}
+    {{with index $d.Counts "paused"}}<span class="count s-admin">{{.}} paused</span>{{end}}
+    {{with index $d.Counts "ok"}}<span class="count s-ok">{{.}} ok</span>{{end}}
+  {{end}}
+  <span class="asof">as of {{$d.GeneratedAt}}</span>
+</div>
+
+{{if $d.Unprotected}}
+<section class="panel alarm">
+  <div class="head">
+    <h2>Not replicated</h2>
+    <span class="note">No vmsync metadata on these VMs. They are not protected by anything.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Host</th><th>VM</th><th>State</th></tr></thead>
+      <tbody>
+        {{range $d.Unprotected}}
+        <tr>
+          <td class="mono">{{.Host}}</td>
+          <td class="mono">{{.VM}}</td>
+          <td>{{if .Active}}running{{else}}shut off{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}
+
+{{if $d.MissingAgents}}
+<section class="panel">
+  <div class="head">
+    <h2>Hosts with no agent</h2>
+    <span class="note">Referenced by a replication pair, but nothing reports for them — these are blind spots, not healthy hosts.</span>
+  </div>
+  <div class="body mono">{{range $i, $h := $d.MissingAgents}}{{if $i}}, {{end}}{{$h}}{{end}}</div>
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="head">
+    <h2>Replication pairs</h2>
+    <span class="note">Worst first. Freshness is read from the target, where vmsync records it.</span>
+  </div>
+  {{if $d.Pairs}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th><th>Source</th><th>Target</th>
+          <th>Behind</th><th>Fails</th><th>Checkpoint</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range $d.Pairs}}
+        <tr>
+          <td><span class="pill {{statusClass .Status}}">{{.Status}}</span></td>
+          <td class="mono">{{.SourceHost}}:{{.SourceVM}}
+            {{if not .SourceSeen}}<div class="warnline">no agent reporting this source</div>{{end}}
+          </td>
+          <td class="mono">{{.TargetHost}}:{{.TargetVM}}
+            {{if .TargetActive}}<div class="warnline">target is running</div>{{end}}
+          </td>
+          <td class="num">{{.AgeString}}</td>
+          <td class="num">{{if .FailureCount}}{{.FailureCount}}{{else}}—{{end}}</td>
+          <td class="mono">{{if .LastCheckpoint}}{{.LastCheckpoint}}{{else}}—{{end}}
+            {{if .Reasons}}<ul class="reasons">{{range .Reasons}}<li>{{.}}</li>{{end}}</ul>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="body empty">No replication pairs reported yet. Enrol an agent to start collecting.</div>
+  {{end}}
+</section>
+
+{{if .Runs}}
+<section class="panel">
+  <div class="head">
+    <h2>Recent syncs</h2>
+    <span class="note">What the agents have actually run, newest first. A failure here is why a pair above went stale.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Result</th><th>Source</th><th>Target</th><th>Started</th><th>Took</th></tr></thead>
+      <tbody>
+        {{range .Runs}}
+        <tr>
+          <td>
+            {{if .OK}}<span class="pill s-ok">ok</span>
+            {{else if .Unknown}}<span class="pill s-warn">unknown</span>
+            {{else if .Busy}}<span class="pill s-warn">busy</span>
+            {{else}}<span class="pill s-crit">failed</span>{{end}}
+            {{/* A SECOND pill, not a rung on the ladder above. A degradation is
+                 orthogonal to the outcome -- an adopted run can be both
+                 unobserved and have left a guest frozen -- so folding it in
+                 would force a choice between two facts that are both true. */}}
+            {{if .Degraded}}<span class="pill s-crit">needs attention</span>{{end}}
+          </td>
+          <td class="mono">{{.Host}}:{{.VM}}
+            {{if .Detail}}<div class="warnline">{{.Detail}}</div>{{end}}
+          </td>
+          <td class="mono">{{if .TargetHost}}{{.TargetHost}}{{else}}—{{end}}</td>
+          <td class="num">{{.When}}</td>
+          <td class="num">{{.Duration}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}
+
+<section class="panel">
+  <div class="head">
+    <h2>Agents</h2>
+    <span class="note">A stale agent means stale data above, not a healthy host.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Host</th><th>Last report</th><th>Config age</th><th>VMs</th><th>Version</th></tr></thead>
+      <tbody>
+        {{range $d.Agents}}
+        <tr>
+          <td class="mono">{{.Hostname}}{{if .Revoked}} <span class="pill s-none">revoked</span>{{end}}{{if .ReadOnly}} <span class="pill s-warn">monitor</span>{{end}}</td>
+          <td class="num">{{.LastSeen}}{{if .Stale}} <span class="pill s-warn">stale</span>{{end}}</td>
+          <td class="num">{{.ConfigAge}}</td>
+          <td class="num">{{.Domains}}</td>
+          <td class="mono">{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5" class="empty">No agents enrolled.</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{{template "foot" .}}

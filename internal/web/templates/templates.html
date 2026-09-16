@@ -1,0 +1,162 @@
+{{define "content"}}
+{{$user := .User}}
+{{$v := .Templates}}
+
+<h1>Schedule templates</h1>
+
+<p class="lede">
+  A template is a named cadence and profile that schedule entries inherit from.
+  Setting one field on a VM overrides just that field; everything else comes
+  from here.
+</p>
+
+{{if $v.HasDefault}}
+  <p class="lede">
+    The <span class="mono">default</span> template also covers every VM that
+    has <em>no entry of its own</em> — but only where a successful sync has
+    already recorded a target, so it never reaches a pair nobody has
+    established by hand.
+  </p>
+{{else}}
+  <p class="lede warnline">
+    There is no <span class="mono">default</span> template, so automatic
+    coverage is off: a VM is replicated only if somebody gives it an entry on
+    the Schedule page. Creating one named <span class="mono">default</span>
+    turns it on.
+  </p>
+{{end}}
+
+<p class="lede">
+  Templates resolve on the <em>agent</em>, not here — a standalone agent has no
+  console at all — so this page cannot show what any particular VM ends up
+  with. The Schedule page shows that, as each agent reports it back.
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Template</th><th>Every</th><th>Profile</th><th>Verify</th>
+      <th>Used by</th>{{if $user.IsAdmin}}<th></th>{{end}}
+    </tr>
+  </thead>
+  <tbody>
+    {{range $v.Rows}}
+    <tr>
+      <td class="mono">
+        {{.Name}}
+        {{if .IsDefault}}<div class="warnline">also covers VMs with no entry</div>{{end}}
+        {{if not .Template.Enabled}}<div class="warnline">disabled — inheriting VMs will not run</div>{{end}}
+      </td>
+      <td class="num">{{.IntervalMinutes}}m</td>
+      <td class="mono">{{if .Template.Preset}}{{.Template.Preset}}{{else}}—{{end}}</td>
+      <td class="mono">
+        {{if .Template.Profile.Verify}}
+          {{.Template.Profile.Verify}}
+          {{if .Template.VerifyDays}}<div class="warnline">{{.Template.VerifyDays}}</div>{{end}}
+          {{if .Template.VerifyWindow}}<div class="warnline">{{.Template.VerifyWindow}}</div>{{end}}
+          {{if .VerifyIntervalMinutes}}<div class="warnline">every {{.VerifyIntervalMinutes}}m</div>{{end}}
+        {{else}}—{{end}}
+      </td>
+      <td class="mono">
+        {{if .UsedBy}}
+          {{range $i, $vm := .UsedBy}}{{if $i}}<br>{{end}}{{$vm}}{{end}}
+        {{else}}
+          {{/* Not the same as "nothing uses it": a default template covers
+               VMs by synthesis, and those have no entry naming anything. */}}
+          <span class="warnline">no entry names it</span>
+        {{end}}
+      </td>
+      {{if $user.IsAdmin}}
+      <td>
+        <form method="post" action="/templates/delete" class="inline"
+              onsubmit="return confirm('Remove template {{.Name}}?');">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <button type="submit" {{if .InUse}}disabled title="entries still name this template"{{end}}>Remove</button>
+        </form>
+      </td>
+      {{end}}
+    </tr>
+    {{end}}
+    {{if not $v.Rows}}
+    <tr><td colspan="6">No templates yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+
+{{if $user.IsAdmin}}
+<h2>Add or replace a template</h2>
+<p class="lede">
+  Saving under an existing name replaces it. Every VM inheriting that template
+  changes with it, on each agent's next check-in.
+</p>
+
+<form method="post" action="/templates/save">
+  <label>Name
+    <input type="text" name="name" required placeholder="nightly"
+           pattern="[A-Za-z0-9_.\-]+"
+           title="letters, digits, dot, dash and underscore">
+  </label>
+
+  <label>Sync every
+    <input type="number" name="interval_minutes" min="1" value="15" required> minutes
+  </label>
+
+  <label>Profile
+    <select name="preset">
+      {{range $v.Presets}}<option value="{{.Name}}">{{.Label}}</option>{{end}}
+    </select>
+  </label>
+
+  <label>Verify
+    <select name="verify">
+      <option value="">no verification</option>
+      <option value="fast">fast</option>
+      <option value="full">full</option>
+      {{if $user.MayRunSuspendingVerify}}<option value="qemu-img">qemu-img (suspends the source)</option>{{end}}
+    </select>
+  </label>
+
+  <fieldset>
+    <legend>How often to verify</legend>
+    <p class="lede">
+      Leave all three blank to verify on every sync. Use an interval
+      <em>or</em> a calendar, never both — the agent refuses a template
+      carrying both, because there is no reading of "every 24 hours, and also
+      the first Sunday" anyone could predict.
+    </p>
+
+    <label>Every
+      <input type="number" name="verify_interval_minutes" min="1"
+             placeholder="blank = every sync"> minutes
+    </label>
+
+    <label>Days
+      <input type="text" name="verify_days" placeholder="Sun *-*-01..07"
+             title="The day half of a systemd OnCalendar expression. Check one with: systemd-analyze calendar &quot;Sun *-*-01..07&quot;">
+    </label>
+
+    <label>Window
+      <input type="text" name="verify_window" placeholder="02:00-12:00"
+             pattern="[0-9]{1,2}:[0-9]{2}-[0-9]{1,2}:[0-9]{2}"
+             title="HH:MM-HH:MM in the AGENT host's own timezone. The start is included, the end is not.">
+    </label>
+
+    <p class="lede">
+      <span class="mono">Sun *-*-01..07</span> with
+      <span class="mono">02:00-12:00</span> is the first Sunday of the month,
+      between 2am and noon, <em>in each agent host's own timezone</em>. The
+      calendar's spelling is checked by the agent, not here — an expression
+      this page accepts can still be refused there, and the Schedule page
+      shows it when that happens.
+    </p>
+  </fieldset>
+
+  <label><input type="checkbox" name="verify_failure_reinit"> On a verify failure, recopy once and verify again</label>
+  <label>Target disk path <input type="text" name="target_disk_path" placeholder="/data/replicas"></label>
+  <label>Retention <input type="text" name="retention" placeholder="24,3h"></label>
+  <label><input type="checkbox" name="enabled" checked> Enabled</label>
+
+  <button type="submit">Save template</button>
+</form>
+{{end}}
+{{end}}

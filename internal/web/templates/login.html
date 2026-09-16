@@ -1,0 +1,12 @@
+{{template "head" .}}
+<div class="login-wrap">
+  <h1>vmsync</h1>
+  <p class="empty">Replication console</p>
+  {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+  <form method="post" action="/login">
+    <input type="text" name="username" placeholder="Username" autocomplete="username" autofocus required>
+    <input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+{{template "foot" .}}

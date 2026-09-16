@@ -1,0 +1,39 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Active}} · vmsync</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{{if .User.Username}}
+<header class="top">
+  <span class="brand">vmsync</span>
+  <nav class="top">
+    <a href="/" {{if eq .Active "dashboard"}}class="on"{{end}}>Availability</a>
+    <a href="/schedule" {{if eq .Active "schedule"}}class="on"{{end}}>Schedule</a>
+    <a href="/templates" {{if eq .Active "templates"}}class="on"{{end}}>Templates</a>
+    <a href="/failover" {{if eq .Active "failover"}}class="on"{{end}}>Failover</a>
+    <a href="/agents" {{if eq .Active "agents"}}class="on"{{end}}>Agents</a>
+    <a href="/audit" {{if eq .Active "audit"}}class="on"{{end}}>Audit</a>
+    {{if .Grafana}}<a href="{{.Grafana}}" rel="noreferrer">Trends ↗</a>{{end}}
+  </nav>
+  <span class="who">
+    {{.User.Username}} <span class="role">{{.User.Role}}</span>
+    <form method="post" action="/logout" class="inline"><button class="quiet">Sign out</button></form>
+  </span>
+</header>
+{{end}}
+<main>
+{{end}}
+
+{{define "foot"}}
+</main>
+<footer class="foot">
+  Replication topology is read from each VM's own libvirt metadata by the agents — this console
+  stores no separate inventory of pairs.
+</footer>
+</body>
+</html>
+{{end}}

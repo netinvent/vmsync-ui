@@ -1,0 +1,25 @@
+{
+  "listen": ":8443",
+
+  "tls_cert": "/etc/vmsync-ui/tls/fullchain.pem",
+  "tls_key": "/etc/vmsync-ui/tls/privkey.pem",
+
+  "state_dir": "/var/lib/vmsync-ui",
+
+  "grafana_url": "",
+
+  "session_hours": 12,
+
+  "accounts": [
+    {
+      "username": "alice",
+      "password_hash": "pbkdf2_sha256$600000$REPLACE$REPLACE",
+      "role": "admin"
+    },
+    {
+      "username": "bob",
+      "password_hash": "pbkdf2_sha256$600000$REPLACE$REPLACE",
+      "role": "readonly"
+    }
+  ]
+}
