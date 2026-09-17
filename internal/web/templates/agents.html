@@ -4,7 +4,7 @@
 <div class="token-box">
   <strong>Enrolment token created.</strong> This is the only time it is shown — it is single-use and
   expires in 24 hours. Run this on the host, once:
-  <code>vmsync-agent --ui &lt;this UI&gt; --enrol-token {{.NewToken}} --once</code>
+  <code>echo {{.NewToken}} | vmsync-agent -ui &lt;this UI URI&gt; -enrol-token - -once</code>
 </div>
 {{end}}
 

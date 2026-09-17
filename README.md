@@ -98,13 +98,7 @@ production at 3am" is a question that gets asked eventually.
 
 On the **Agents** page, create a token for a hostname. It is shown once,
 is single-use, is bound to that hostname, and expires in 24 hours. Then on
-the hypervisor:
-
-```bash
-vmsync-agent --ui https://vmsync-ui.example.org \
-             --enrol-token PASTE_TOKEN_HERE \
-             --once
-```
+the hypervisor, follow agent enrolling procedure.
 
 That exchanges the token for a long-lived credential and sends one report.
 Start the service afterwards.
