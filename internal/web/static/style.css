@@ -1,50 +1,151 @@
 /* vmsync-ui — an operations console, scanned rather than read.
-   Dense tables, monospace for anything an operator would copy, semantic
-   colour kept separate from the accent so status never competes with
-   decoration. */
+    Dense tables, monospace for anything an operator would copy, semantic
+    colour kept separate from the accent so status never competes with
+    decoration.
+    Palette: titles #1093DD, page background #F0F0F0, status hues
+    orange #FF6A00 (critical), yellow #FFC430 (warning),
+    green #0DA000 (ok) and blue #246FB5 (links, buttons, admin states).
+    Body text is Lato, served from /static/fonts so the console renders the
+    same on machines that have it installed and machines that do not.
+    (Lato (c) tyPoland Lukasz Dziedzic, SIL Open Font License 1.1.) */
 
-:root {
-  --bg:        #f6f7f9;
-  --surface:   #ffffff;
-  --surface-2: #eef1f4;
-  --ink:       #16202b;
-  --ink-soft:  #4a5866;
-  --muted:     #6b7885;
-  --rule:      #d7dee5;
-  --accent:    #2d6fa8;
+/* --- Lato, vendored -------------------------------------------------- */
 
-  /* Semantic, deliberately not the accent. */
-  --ok:        #2f7148;
-  --ok-bg:     #e3f0e8;
-  --warn:      #8a5a10;
-  --warn-bg:   #fbeed5;
-  --crit:      #a8331f;
-  --crit-bg:   #f8e3df;
-  --admin:     #3c5a99;
-  --admin-bg:  #e5ebf7;
-  --none:      #5f6b77;
-  --none-bg:   #e8ecef;
-
-  --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+@font-face {
+  font-family: "Lato";
+  src: url("/static/fonts/lato-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("/static/fonts/lato-400-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("/static/fonts/lato-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lato";
+  src: url("/static/fonts/lato-700-italic.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:        #0f151b;
-    --surface:   #161f28;
-    --surface-2: #1d2833;
-    --ink:       #dde5ec;
-    --ink-soft:  #b0bcc8;
-    --muted:     #8494a1;
-    --rule:      #2a3742;
-    --accent:    #71acdc;
+/* --- light theme (the default) ---------------------------------------- */
 
-    --ok:        #79b893;  --ok-bg:    #16281d;
-    --warn:      #d9a441;  --warn-bg:  #2b2313;
-    --crit:      #e08a6e;  --crit-bg:  #2e1b16;
-    --admin:     #8fabdd;  --admin-bg: #1a2233;
-    --none:      #93a1ad;  --none-bg:  #1e262e;
+:root {
+  color-scheme: light;
+
+  --bg:        #F0F0F0;
+  --surface:   #ffffff;
+  --surface-2: #e6ebf0;
+  --ink:       #17222c;
+  --ink-soft:  #44545f;
+  --muted:     #66757f;
+  --rule:      #d2dbe3;
+
+  /* Titles and brand. */
+  --title:     #1093DD;
+  /* Links, buttons, the active nav underline. --on-accent is the text
+     that sits on a solid accent fill. */
+  --accent:    #246FB5;
+  --on-accent: #ffffff;
+
+  /* Semantic hues. The -ink colours are what sits ON the solid pill
+     backgrounds (dark text on yellow/orange: white on either fails
+     contrast); the bare names are text used directly on surfaces. */
+  --ok:        #0a6e00;
+  --ok-bg:     #ddf1dc;
+  --warn:      #7a5c00;
+  --warn-bg:   #FFC430;
+  --warn-ink:  #4a3600;
+  --crit:      #9a4400;
+  --crit-bg:   #ffe4d1;
+  --crit-ink:  #261100;
+  --crit-solid:#FF6A00;
+  --admin:     #246FB5;
+  --admin-bg:  #e1edf8;
+  --none:      #5f6b77;
+  --none-bg:   #e2e7eb;
+
+  --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+  --sans: "Lato", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* --- dark theme ---------------------------------------------------------
+   Selected with the header toggle (persisted) via data-theme on <html>.
+   Same hues, lifted onto dark surfaces so contrast survives the inversion. */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg:        #14171b;
+  --surface:   #1e232a;
+  --surface-2: #28303a;
+  --ink:       #e8ecef;
+  --ink-soft:  #b9c4ce;
+  --muted:     #8d9aa6;
+  --rule:      #333e49;
+
+  --title:     #3fa9e8;
+  --accent:    #7fb3e0;
+  --on-accent: #10161c;
+
+  --ok:        #5fce62;
+  --ok-bg:     #122b14;
+  --warn:      #f2c14e;
+  --warn-bg:   #FFC430;
+  --warn-ink:  #4a3600;
+  --crit:      #ff8a4d;
+  --crit-bg:   #33190d;
+  --crit-ink:  #261100;
+  --crit-solid:#FF6A00;
+  --admin:     #8fb4e2;
+  --admin-bg:  #1b2740;
+  --none:      #9aa7b2;
+  --none-bg:   #262e37;
+}
+
+/* No JavaScript: fall back to whatever the OS asks for. The toggle script
+   always sets data-theme when it runs, so this only governs no-JS clients. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --bg:        #14171b;
+    --surface:   #1e232a;
+    --surface-2: #28303a;
+    --ink:       #e8ecef;
+    --ink-soft:  #b9c4ce;
+    --muted:     #8d9aa6;
+    --rule:      #333e49;
+
+    --title:     #3fa9e8;
+    --accent:    #7fb3e0;
+    --on-accent: #10161c;
+
+    --ok:        #5fce62;
+    --ok-bg:     #122b14;
+    --warn:      #f2c14e;
+    --warn-bg:   #FFC430;
+    --warn-ink:  #4a3600;
+    --crit:      #ff8a4d;
+    --crit-bg:   #33190d;
+    --crit-ink:  #261100;
+    --crit-solid:#FF6A00;
+    --admin:     #8fb4e2;
+    --admin-bg:  #1b2740;
+    --none:      #9aa7b2;
+    --none-bg:   #262e37;
   }
 }
 
@@ -71,7 +172,7 @@ header.top {
   border-bottom: 1px solid var(--rule);
 }
 
-.brand { font-family: var(--mono); font-weight: 600; letter-spacing: -0.01em; }
+.brand { font-family: var(--mono); font-weight: 700; letter-spacing: -0.01em; color: var(--title); }
 
 nav.top { display: flex; gap: 1.1rem; margin-right: auto; }
 nav.top a {
@@ -97,8 +198,11 @@ nav.top a.on { color: var(--ink); border-bottom-color: var(--accent); }
 
 main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
 
-h1 { font-size: 1.25rem; margin: 0; }
-h2 { font-size: 1rem; margin: 0 0 0.6rem; }
+h1 { font-size: 1.25rem; margin: 0; color: var(--title); }
+h2 { font-size: 1rem; margin: 0 0 0.6rem; color: var(--title); }
+/* Alarm heads keep their warning colour: a title-blue heading on a
+   critical panel would read as decoration, not danger. */
+section.panel.alarm > .head h2 { color: var(--crit); }
 
 /* --- verdict line: the first thing read ------------------------------- */
 
@@ -123,8 +227,8 @@ h2 { font-size: 1rem; margin: 0 0 0.6rem; }
   font-variant-numeric: tabular-nums;
 }
 .count.s-ok    { background: var(--ok-bg);    color: var(--ok); }
-.count.s-warn  { background: var(--warn-bg);  color: var(--warn); }
-.count.s-crit  { background: var(--crit-bg);  color: var(--crit); }
+.count.s-warn  { background: var(--warn-bg);  color: var(--warn-ink); }
+.count.s-crit  { background: var(--crit-solid); color: var(--crit-ink); font-weight: 700; }
 .count.s-admin { background: var(--admin-bg); color: var(--admin); }
 .count.s-none  { background: var(--none-bg);  color: var(--none); }
 
@@ -147,8 +251,9 @@ section.panel > .head .note { font-size: 0.82rem; color: var(--muted); }
 section.panel > .body { padding: 1.25rem; }
 
 /* Loud on purpose: an unprotected VM is invisible in a green board unless
-   something makes it not be. */
-section.panel.alarm { border-color: var(--crit); }
+    something makes it not be. The border is solid orange; the head keeps
+    the tinted background so its heading stays legible on it. */
+section.panel.alarm { border-color: var(--crit-solid); }
 section.panel.alarm > .head { background: var(--crit-bg); color: var(--crit); }
 
 .table-wrap { overflow-x: auto; }
@@ -185,8 +290,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
   white-space: nowrap;
 }
 .pill.s-ok    { background: var(--ok-bg);    color: var(--ok); }
-.pill.s-warn  { background: var(--warn-bg);  color: var(--warn); }
-.pill.s-crit  { background: var(--crit-bg);  color: var(--crit); }
+/* Warning and critical pills are solid yellow / orange with dark text:
+   white on either fails contrast, and these are the two states that must
+   survive a glance across the room. */
+.pill.s-warn  { background: var(--warn-bg);  color: var(--warn-ink); }
+.pill.s-crit  { background: var(--crit-solid); color: var(--crit-ink); font-weight: 700; }
 .pill.s-admin { background: var(--admin-bg); color: var(--admin); }
 .pill.s-none  { background: var(--none-bg);  color: var(--none); }
 
@@ -217,10 +325,17 @@ button {
   border: 1px solid var(--accent);
   border-radius: 4px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   cursor: pointer;
 }
 button.quiet { background: transparent; color: var(--accent); }
+/* The theme toggle sits in the header next to sign-out: a quiet button
+   with a visible outline so it reads as a control, not a status label.
+   Hidden until the script sets data-theme, so no-JS clients never see a
+   button that would do nothing. */
+html:not([data-theme]) #theme-toggle { display: none; }
+button.theme-toggle { border-color: var(--rule); white-space: nowrap; }
+button.theme-toggle:hover { border-color: var(--accent); }
 button.danger { background: transparent; border-color: var(--crit); color: var(--crit); }
 button:hover { filter: brightness(1.08); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

@@ -3,8 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>{{.Active}} · vmsync</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="preload" href="/static/fonts/lato-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/lato-700.woff2" as="font" type="font/woff2" crossorigin>
+<script src="/static/theme.js"></script>
 </head>
 <body>
 {{if .User.Username}}
@@ -21,6 +25,7 @@
   </nav>
   <span class="who">
     {{.User.Username}} <span class="role">{{.User.Role}}</span>
+    <button id="theme-toggle" class="quiet theme-toggle" type="button" aria-pressed="false" title="Switch to dark mode"><span data-theme-label>Dark mode</span></button>
     <form method="post" action="/logout" class="inline"><button class="quiet">Sign out</button></form>
   </span>
 </header>

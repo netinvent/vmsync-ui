@@ -37,7 +37,7 @@ import (
 	"vmsync-ui/internal/store"
 )
 
-//go:embed templates/*.html static/*
+//go:embed templates/*.html static/* static/fonts/*
 var assets embed.FS
 
 type Server struct {

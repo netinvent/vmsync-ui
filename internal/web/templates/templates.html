@@ -1,6 +1,9 @@
-{{define "content"}}
+{{template "head" .}}
 {{$user := .User}}
 {{$v := .Templates}}
+
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
 
 <h1>Schedule templates</h1>
 
@@ -159,4 +162,5 @@
   <button type="submit">Save template</button>
 </form>
 {{end}}
-{{end}}
+
+{{template "foot" .}}
