@@ -69,12 +69,13 @@
 {{end}}
 
 <div class="verdict">
-  {{if and (not (index $d.Counts "critical")) (not (index $d.Counts "warning")) (not (index $d.Counts "unreplicated"))}}
+  {{if and (not (index $d.Counts "critical")) (not (index $d.Counts "warning")) (not (index $d.Counts "unreplicated")) (not (index $d.Counts "missing-target"))}}
     <span class="all-well">Every replicated VM is current, and every VM is replicated.</span>
   {{else}}
     {{with index $d.Counts "critical"}}<span class="count s-crit">{{.}} critical</span>{{end}}
     {{with index $d.Counts "warning"}}<span class="count s-warn">{{.}} warning</span>{{end}}
     {{with index $d.Counts "unreplicated"}}<span class="count s-none">{{.}} unprotected</span>{{end}}
+    {{with index $d.Counts "missing-target"}}<span class="count s-crit">{{.}} missing target</span>{{end}}
     {{with index $d.Counts "promoted"}}<span class="count s-admin">{{.}} promoted</span>{{end}}
     {{with index $d.Counts "paused"}}<span class="count s-admin">{{.}} paused</span>{{end}}
     {{with index $d.Counts "ok"}}<span class="count s-ok">{{.}} ok</span>{{end}}
@@ -112,6 +113,30 @@
     <span class="note">Referenced by a replication pair, but nothing reports for them — these are blind spots, not healthy hosts.</span>
   </div>
   <div class="body mono">{{range $i, $h := $d.MissingAgents}}{{if $i}}, {{end}}{{$h}}{{end}}</div>
+</section>
+{{end}}
+
+{{if $d.MissingTargets}}
+<section class="panel alarm">
+  <div class="head">
+    <h2>Target missing</h2>
+    <span class="note">These sources name a replica no reporting agent has. It was deleted, renamed, or never created — their syncs have nowhere to land, so these VMs effectively have no copy.</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Source</th><th>Expected target</th></tr></thead>
+      <tbody>
+        {{range $d.MissingTargets}}
+        <tr>
+          <td class="mono">{{.SourceHost}}:{{.SourceVM}}</td>
+          <td class="mono">{{.TargetHost}}:{{.TargetVM}}
+            {{if .PeerStale}}<div class="warnline">that host's report is stale — recheck when it checks in</div>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
 </section>
 {{end}}
 

@@ -119,6 +119,12 @@ Ordered worst-first, because the page is read to find what needs attention.
   replication for is otherwise *absent* from a green board and looks fine.
 - **Hosts with no agent** are listed as blind spots. "I cannot see this" must
   never render as "this is healthy".
+- **Target missing** gets its own alarm-styled panel. A source whose named
+  replica is in no agent's report — deleted, renamed or never created on a
+  host that *is* reporting — has no copy anywhere, and pair rows built from
+  the target side can never show it. (A target host with no agent at all
+  stays under "Hosts with no agent" instead, so one situation is not
+  reported twice.)
 - **Behind** is the replication lag — how much you would lose. A never-synced
   target shows `—` rather than `0`, which would read as "just synced".
 - **promoted** and **paused** get a distinct neutral colour. They are

@@ -228,6 +228,111 @@ func TestBuildDashboardFlagsHostsWithNoAgent(t *testing.T) {
 	}
 }
 
+func TestBuildDashboardFlagsSourceWithNoMatchingTarget(t *testing.T) {
+	// hyper02p reports, but the replica haproxy01p's metadata names is not
+	// in its report: deleted, renamed or never created. No pair row can be
+	// built from the target side, so without this the source is invisible
+	// on the availability page -- replicating nowhere, silently.
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+			{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok", Active: true},
+		}},
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+			{Name: "hap01l.test.local", ReplicaSource: "hyper01p:hap01l.test.local", Status: "ok", AgeSeconds: 60},
+		}},
+	}
+
+	d := BuildDashboard(agents, reports, now)
+	if len(d.Pairs) != 1 {
+		t.Fatalf("got %d pairs, want 1 -- only the target hyper02p actually reported builds a row", len(d.Pairs))
+	}
+	if len(d.MissingAgents) != 0 {
+		t.Fatalf("MissingAgents = %v, want none -- hyper02p has an agent; its replica is what is missing", d.MissingAgents)
+	}
+	if len(d.MissingTargets) != 1 {
+		t.Fatalf("got %d missing targets, want exactly the haproxy01p reference", len(d.MissingTargets))
+	}
+	m := d.MissingTargets[0]
+	if m.SourceHost != "hyper01p" || m.SourceVM != "haproxy01p.badmin.local" {
+		t.Errorf("missing target names source %+v, want hyper01p:haproxy01p.badmin.local", m)
+	}
+	if m.TargetHost != "hyper02p" || m.TargetVM != "haproxy01p.badmin.local" {
+		t.Errorf("missing target names target %q:%q, want the reference as the source's metadata wrote it", m.TargetHost, m.TargetVM)
+	}
+	if m.PeerStale {
+		t.Error("PeerStale is true although hyper02p reported just now")
+	}
+	if d.Counts["missing-target"] != 1 {
+		t.Errorf("missing-target count = %d, want 1 -- otherwise the verdict line stays green over a VM with no copy", d.Counts["missing-target"])
+	}
+
+	s := testServer(t)
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "dashboard.html", pageData{
+		User:      auth.User{Username: "op", Role: auth.RoleAdmin},
+		Active:    "dashboard",
+		Dashboard: d,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+	if !strings.Contains(html, "Target missing") || !strings.Contains(html, "haproxy01p.badmin.local") {
+		t.Error("the source replicating nowhere is not called out on the page")
+	}
+	if !strings.Contains(html, "missing target") {
+		t.Error("the verdict line does not count the source with no target")
+	}
+}
+
+func TestBuildDashboardMissingTargetNeedsAReportingPeer(t *testing.T) {
+	// The target host has no agent at all: MissingAgents already says that,
+	// and a per-VM row would repeat it once per source.
+	agents := []store.Agent{{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()}}
+	reports := map[string]store.Report{"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok"},
+	}}}
+
+	d := BuildDashboard(agents, reports, now)
+	if len(d.MissingAgents) != 1 || d.MissingAgents[0] != "hyper02p" {
+		t.Fatalf("MissingAgents = %v, want [hyper02p]", d.MissingAgents)
+	}
+	if len(d.MissingTargets) != 0 {
+		t.Errorf("MissingTargets = %+v, want none -- the unheard-from host is already reported once", d.MissingTargets)
+	}
+	if c := d.Counts["missing-target"]; c != 0 {
+		t.Errorf("missing-target count = %d, want 0", c)
+	}
+}
+
+func TestBuildDashboardMissingTargetNotesAStalePeer(t *testing.T) {
+	// hyper02p's report is old: the replica's absence is unconfirmed, but
+	// hiding the row would trade a qualified warning for silence.
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Add(-time.Hour).Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+			{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok"},
+		}},
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Add(-time.Hour).Unix(), Domains: []store.ReportDomain{
+			{Name: "other", Status: "unreplicated"},
+		}},
+	}
+
+	d := BuildDashboard(agents, reports, now)
+	if len(d.MissingTargets) != 1 {
+		t.Fatalf("got %d missing targets, want 1 with a stale-peer qualifier", len(d.MissingTargets))
+	}
+	if !d.MissingTargets[0].PeerStale {
+		t.Error("PeerStale is false although hyper02p was last seen an hour ago")
+	}
+}
+
 func TestBuildDashboardSortsWorstFirst(t *testing.T) {
 	// An availability page is read to find what needs attention. Burying a
 	// critical pair below a page of healthy ones defeats the purpose.

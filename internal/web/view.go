@@ -182,6 +182,16 @@ type Dashboard struct {
 	// some domain, but which no enrolled agent reports for. Those are the
 	// blind spots in the picture.
 	MissingAgents []string
+	// MissingTargets names sources whose metadata points at a target no
+	// reporting agent has. The replica was deleted, renamed, or never
+	// created -- in all three cases syncs have nowhere to land and the VM
+	// effectively has no copy, which is exactly what this page exists to
+	// say out loud.
+	//
+	// Only listed when the target host HAS a reporting agent. When it has
+	// none, MissingAgents above already says so, and a per-VM row would
+	// merely repeat it once per source.
+	MissingTargets []MissingTarget
 	GeneratedAt   string
 }
 
@@ -189,6 +199,25 @@ type Unprotected struct {
 	Host   string
 	VM     string
 	Active bool
+}
+
+// MissingTarget is one source-to-target reference that resolves to
+// nothing: the target host is heard from, but no agent anywhere reports
+// that VM.
+type MissingTarget struct {
+	// SourceHost/SourceVM name the source, as its own agent reported it.
+	SourceHost string
+	SourceVM   string
+	// TargetHost/TargetVM are the reference as written in the source's own
+	// metadata -- the name to go looking for on the target host, not a
+	// guess at what it is called now.
+	TargetHost string
+	TargetVM   string
+	// PeerStale is true when the target host's report is itself old. The
+	// row still shows -- absence from an old report is weak evidence, but
+	// hiding it would trade a qualified warning for silence -- and the
+	// template says so next to it.
+	PeerStale bool
 }
 
 // staleAfter is how long without a report before an agent is called stale.
@@ -214,6 +243,10 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 	}
 	byRef := map[string]located{}
 	hostsWithAgents := map[string]bool{}
+	// hostFresh marks the hosts at least one agent reported for recently.
+	// A target missing from a FRESH peer report is gone; missing from a
+	// stale one is merely unconfirmed, and the row says which.
+	hostFresh := map[string]bool{}
 
 	for _, a := range agents {
 		rep, ok := reports[a.ID]
@@ -224,7 +257,11 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 		if host == "" {
 			host = a.Hostname
 		}
-		hostsWithAgents[strings.ToLower(host)] = true
+		key := strings.ToLower(host)
+		hostsWithAgents[key] = true
+		if a.LastSeenAt > 0 && now.Sub(time.Unix(a.LastSeenAt, 0)) <= staleAfter {
+			hostFresh[key] = true
+		}
 		for _, dom := range rep.Domains {
 			byRef[strings.ToLower(host+":"+dom.Name)] = located{host: host, domain: dom, reportedAt: rep.ReportedAtUnix}
 		}
@@ -279,15 +316,33 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					d.SplitBrainPossible = append(d.SplitBrainPossible, p)
 				}
 
-			case len(dom.ReplicaTargets) > 0:
-				// A source. Its pairs are rendered from the target side; all
-				// that is recorded here is which hosts it points at, so a
-				// target host with no agent shows up as a blind spot.
-				for _, ref := range dom.ReplicaTargets {
-					if h, _ := splitRef(ref); h != "" {
-						referencedHosts[strings.ToLower(h)] = true
-					}
+		case len(dom.ReplicaTargets) > 0:
+			// A source. Its pairs are rendered from the target side; all
+			// that is recorded here is which hosts it points at, so a
+			// target host with no agent shows up as a blind spot.
+			for _, ref := range dom.ReplicaTargets {
+				tgtHost, tgtVM := splitRef(ref)
+				if tgtHost == "" {
+					// A bare VM name with no host half. Nothing can resolve
+					// it to a peer report, so there is no absence to report.
+					continue
 				}
+				referencedHosts[strings.ToLower(tgtHost)] = true
+				// The replica this source names is in no agent's report. If
+				// its host is not heard from at all, MissingAgents already
+				// says so; if the host IS heard from, the replica itself is
+				// gone, which nothing else on this page says.
+				if _, ok := byRef[strings.ToLower(tgtHost+":"+tgtVM)]; !ok && hostsWithAgents[strings.ToLower(tgtHost)] {
+					d.MissingTargets = append(d.MissingTargets, MissingTarget{
+						SourceHost: host,
+						SourceVM:   dom.Name,
+						TargetHost: tgtHost,
+						TargetVM:   tgtVM,
+						PeerStale:  !hostFresh[strings.ToLower(tgtHost)],
+					})
+					d.Counts["missing-target"]++
+				}
+			}
 
 			default:
 				if dom.Status == "unreplicated" {
@@ -329,6 +384,18 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 			return d.Unprotected[i].Host < d.Unprotected[j].Host
 		}
 		return d.Unprotected[i].VM < d.Unprotected[j].VM
+	})
+	sort.Slice(d.MissingTargets, func(i, j int) bool {
+		if d.MissingTargets[i].SourceHost != d.MissingTargets[j].SourceHost {
+			return d.MissingTargets[i].SourceHost < d.MissingTargets[j].SourceHost
+		}
+		if d.MissingTargets[i].SourceVM != d.MissingTargets[j].SourceVM {
+			return d.MissingTargets[i].SourceVM < d.MissingTargets[j].SourceVM
+		}
+		if d.MissingTargets[i].TargetHost != d.MissingTargets[j].TargetHost {
+			return d.MissingTargets[i].TargetHost < d.MissingTargets[j].TargetHost
+		}
+		return d.MissingTargets[i].TargetVM < d.MissingTargets[j].TargetVM
 	})
 
 	for _, a := range agents {
