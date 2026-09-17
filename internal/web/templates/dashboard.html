@@ -74,11 +74,11 @@
   {{else}}
     {{with index $d.Counts "critical"}}<span class="count s-crit">{{.}} critical</span>{{end}}
     {{with index $d.Counts "warning"}}<span class="count s-warn">{{.}} warning</span>{{end}}
-    {{with index $d.Counts "unreplicated"}}<span class="count s-none">{{.}} unprotected</span>{{end}}
     {{with index $d.Counts "missing-target"}}<span class="count s-crit">{{.}} missing target</span>{{end}}
     {{with index $d.Counts "promoted"}}<span class="count s-admin">{{.}} promoted</span>{{end}}
     {{with index $d.Counts "paused"}}<span class="count s-admin">{{.}} paused</span>{{end}}
     {{with index $d.Counts "ok"}}<span class="count s-ok">{{.}} ok</span>{{end}}
+    {{with index $d.Counts "unreplicated"}}<span class="count s-none">{{.}} unprotected</span>{{end}}
   {{end}}
   <span class="asof">as of {{$d.GeneratedAt}}</span>
 </div>
