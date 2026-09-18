@@ -36,12 +36,10 @@
     var btn = document.getElementById("theme-toggle");
     if (btn) {
       var dark = theme === "dark";
+      var name = dark ? "Switch to light mode" : "Switch to dark mode";
       btn.setAttribute("aria-pressed", dark ? "true" : "false");
-      btn.title = dark ? "Switch to light mode" : "Switch to dark mode";
-      var label = btn.querySelector("[data-theme-label]");
-      if (label) {
-        label.textContent = dark ? "Light mode" : "Dark mode";
-      }
+      btn.setAttribute("aria-label", name);
+      btn.title = name;
     }
   }
 
