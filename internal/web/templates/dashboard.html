@@ -120,7 +120,7 @@
 <section class="panel alarm">
   <div class="head">
     <h2>Target missing</h2>
-    <span class="note">These sources name a replica no reporting agent has. It was deleted, renamed, or never created — their syncs have nowhere to land, so these VMs effectively have no copy.</span>
+    <span class="note">These sources name a replica no agent reports under that exact name — deleted, never created, or spelled differently here than in any report. Their syncs have nowhere to land, so these VMs effectively have no copy.</span>
   </div>
   <div class="table-wrap">
     <table>
@@ -130,7 +130,8 @@
         <tr>
           <td class="mono">{{.SourceHost}}:{{.SourceVM}}</td>
           <td class="mono">{{.TargetHost}}:{{.TargetVM}}
-            {{if .PeerStale}}<div class="warnline">that host's report is stale — recheck when it checks in</div>{{end}}
+            {{if not .PeerKnown}}<div class="warnline">no agent reports under that exact name — typo, or a short name where the agent reports an FQDN</div>
+            {{else if .PeerStale}}<div class="warnline">that host's report is stale — recheck when it checks in</div>{{end}}
           </td>
         </tr>
         {{end}}

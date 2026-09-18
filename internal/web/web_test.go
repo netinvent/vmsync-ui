@@ -263,6 +263,9 @@ func TestBuildDashboardFlagsSourceWithNoMatchingTarget(t *testing.T) {
 	if m.TargetHost != "hyper02p" || m.TargetVM != "haproxy01p.badmin.local" {
 		t.Errorf("missing target names target %q:%q, want the reference as the source's metadata wrote it", m.TargetHost, m.TargetVM)
 	}
+	if !m.PeerKnown {
+		t.Error("PeerKnown is false although hyper02p has a reporting agent")
+	}
 	if m.PeerStale {
 		t.Error("PeerStale is true although hyper02p reported just now")
 	}
@@ -288,9 +291,11 @@ func TestBuildDashboardFlagsSourceWithNoMatchingTarget(t *testing.T) {
 	}
 }
 
-func TestBuildDashboardMissingTargetNeedsAReportingPeer(t *testing.T) {
-	// The target host has no agent at all: MissingAgents already says that,
-	// and a per-VM row would repeat it once per source.
+func TestBuildDashboardMissingTargetShowsAnUnknownPeer(t *testing.T) {
+	// The target host has no agent at all. The reference is still shown
+	// verbatim rather than resolved away: something has to name the
+	// misconfiguration, and the host-level blind-spot line cannot point at
+	// which source is affected.
 	agents := []store.Agent{{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()}}
 	reports := map[string]store.Report{"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
 		{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok"},
@@ -300,11 +305,31 @@ func TestBuildDashboardMissingTargetNeedsAReportingPeer(t *testing.T) {
 	if len(d.MissingAgents) != 1 || d.MissingAgents[0] != "hyper02p" {
 		t.Fatalf("MissingAgents = %v, want [hyper02p]", d.MissingAgents)
 	}
-	if len(d.MissingTargets) != 0 {
-		t.Errorf("MissingTargets = %+v, want none -- the unheard-from host is already reported once", d.MissingTargets)
+	if len(d.MissingTargets) != 1 {
+		t.Fatalf("MissingTargets = %+v, want the one dangling reference shown as-is", d.MissingTargets)
 	}
-	if c := d.Counts["missing-target"]; c != 0 {
-		t.Errorf("missing-target count = %d, want 0", c)
+	m := d.MissingTargets[0]
+	if m.PeerKnown {
+		t.Error("PeerKnown is true although no agent reports for hyper02p")
+	}
+	if m.PeerStale {
+		t.Error("PeerStale is true although there is no report to be stale")
+	}
+	if c := d.Counts["missing-target"]; c != 1 {
+		t.Errorf("missing-target count = %d, want 1", c)
+	}
+
+	s := testServer(t)
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "dashboard.html", pageData{
+		User:      auth.User{Username: "op", Role: auth.RoleAdmin},
+		Active:    "dashboard",
+		Dashboard: d,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if html := buf.String(); !strings.Contains(html, "no agent reports under that exact name") {
+		t.Error("the row does not say the target name resolves to no agent")
 	}
 }
 
@@ -328,8 +353,56 @@ func TestBuildDashboardMissingTargetNotesAStalePeer(t *testing.T) {
 	if len(d.MissingTargets) != 1 {
 		t.Fatalf("got %d missing targets, want 1 with a stale-peer qualifier", len(d.MissingTargets))
 	}
+	if !d.MissingTargets[0].PeerKnown {
+		t.Error("PeerKnown is false although hyper02p has an agent")
+	}
 	if !d.MissingTargets[0].PeerStale {
 		t.Error("PeerStale is false although hyper02p was last seen an hour ago")
+	}
+}
+
+func TestBuildDashboardHostMatchingIsExact(t *testing.T) {
+	// Short refs against FQDN reports do NOT resolve: normalising them
+	// would hide a misconfiguration instead of showing it. Every join on
+	// this page treats "hyper02p" and "hyper02p.badmin.local" as different
+	// hosts, and every dangling reference shows up verbatim.
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p.badmin.local", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+			{Name: "hap01l.test.local", ReplicaTargets: []string{"hyper02p:hap01l.test.local"}, Status: "ok", Active: true},
+			{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok", Active: true},
+		}},
+		"tgt": {Hostname: "hyper02p.badmin.local", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+			{Name: "hap01l.test.local", ReplicaSource: "hyper01p:hap01l.test.local", Status: "ok", AgeSeconds: 60},
+		}},
+	}
+
+	d := BuildDashboard(agents, reports, now)
+	if len(d.Pairs) != 1 {
+		t.Fatalf("got %d pairs, want the one target hyper02p reported", len(d.Pairs))
+	}
+	if d.Pairs[0].SourceSeen {
+		t.Error("SourceSeen is true although nothing reports under the short name the replica_source uses")
+	}
+	if len(d.MissingAgents) != 2 || d.MissingAgents[0] != "hyper01p" || d.MissingAgents[1] != "hyper02p" {
+		t.Errorf("MissingAgents = %v, want both short names -- neither resolves to an FQDN report", d.MissingAgents)
+	}
+	// Both sources dangle: haproxy01p's replica is genuinely gone, and
+	// hap01l's resolves to nothing either under exact matching. Each row
+	// names its misconfiguration instead of guessing.
+	if len(d.MissingTargets) != 2 {
+		t.Fatalf("MissingTargets = %+v, want both dangling references shown as-is", d.MissingTargets)
+	}
+	for _, m := range d.MissingTargets {
+		if m.PeerKnown {
+			t.Errorf("%+v claims a known peer although no agent reports under %q", m, m.TargetHost)
+		}
+		if got := m.TargetHost; got != "hyper02p" {
+			t.Errorf("target host displays as %q, want the reference as written, not the report's FQDN", got)
+		}
 	}
 }
 

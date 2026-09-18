@@ -183,14 +183,12 @@ type Dashboard struct {
 	// blind spots in the picture.
 	MissingAgents []string
 	// MissingTargets names sources whose metadata points at a target no
-	// reporting agent has. The replica was deleted, renamed, or never
-	// created -- in all three cases syncs have nowhere to land and the VM
-	// effectively has no copy, which is exactly what this page exists to
-	// say out loud.
-	//
-	// Only listed when the target host HAS a reporting agent. When it has
-	// none, MissingAgents above already says so, and a per-VM row would
-	// merely repeat it once per source.
+	// reporting agent has under that exact name. The replica was deleted,
+	// renamed, never created -- or the reference itself is misspelled, or
+	// uses a short name where the agent reports an FQDN. All of those mean
+	// the syncs have nowhere to land, so every one of them is shown
+	// verbatim: matching stays exact (case-insensitive only) so a naming
+	// problem reads as a naming problem instead of being resolved away.
 	MissingTargets []MissingTarget
 	GeneratedAt   string
 }
@@ -202,8 +200,7 @@ type Unprotected struct {
 }
 
 // MissingTarget is one source-to-target reference that resolves to
-// nothing: the target host is heard from, but no agent anywhere reports
-// that VM.
+// nothing, shown exactly as written.
 type MissingTarget struct {
 	// SourceHost/SourceVM name the source, as its own agent reported it.
 	SourceHost string
@@ -213,10 +210,13 @@ type MissingTarget struct {
 	// guess at what it is called now.
 	TargetHost string
 	TargetVM   string
-	// PeerStale is true when the target host's report is itself old. The
-	// row still shows -- absence from an old report is weak evidence, but
-	// hiding it would trade a qualified warning for silence -- and the
-	// template says so next to it.
+	// PeerKnown is false when no agent reports under the target's exact
+	// name at all: a typo, or a short name where the agent reports an
+	// FQDN. The row is the way back to the spelling mistake.
+	PeerKnown bool
+	// PeerStale is true when the target host IS known but its report is
+	// old. Absence from an old report is weak evidence, but hiding the row
+	// would trade a qualified warning for silence.
 	PeerStale bool
 }
 
@@ -243,9 +243,9 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 	}
 	byRef := map[string]located{}
 	hostsWithAgents := map[string]bool{}
-	// hostFresh marks the hosts at least one agent reported for recently.
-	// A target missing from a FRESH peer report is gone; missing from a
-	// stale one is merely unconfirmed, and the row says which.
+	// hostFresh marks the hosts at least one agent reported for recently,
+	// so a missing target on a stale peer renders as unconfirmed rather
+	// than gone.
 	hostFresh := map[string]bool{}
 
 	for _, a := range agents {
@@ -281,12 +281,12 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 
 		for _, dom := range rep.Domains {
 			switch {
-			case dom.ReplicaSource != "":
-				srcHost, srcVM := splitRef(dom.ReplicaSource)
-				if srcHost != "" {
-					referencedHosts[strings.ToLower(srcHost)] = true
-				}
-				src, seen := byRef[strings.ToLower(dom.ReplicaSource)]
+		case dom.ReplicaSource != "":
+			srcHost, srcVM := splitRef(dom.ReplicaSource)
+			if srcHost != "" {
+				referencedHosts[strings.ToLower(srcHost)] = true
+			}
+			src, seen := byRef[strings.ToLower(dom.ReplicaSource)]
 				p := Pair{
 					SourceHost:     srcHost,
 					SourceVM:       srcVM,
@@ -327,21 +327,27 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					// it to a peer report, so there is no absence to report.
 					continue
 				}
-				referencedHosts[strings.ToLower(tgtHost)] = true
-				// The replica this source names is in no agent's report. If
-				// its host is not heard from at all, MissingAgents already
-				// says so; if the host IS heard from, the replica itself is
-				// gone, which nothing else on this page says.
-				if _, ok := byRef[strings.ToLower(tgtHost+":"+tgtVM)]; !ok && hostsWithAgents[strings.ToLower(tgtHost)] {
-					d.MissingTargets = append(d.MissingTargets, MissingTarget{
-						SourceHost: host,
-						SourceVM:   dom.Name,
-						TargetHost: tgtHost,
-						TargetVM:   tgtVM,
-						PeerStale:  !hostFresh[strings.ToLower(tgtHost)],
-					})
-					d.Counts["missing-target"]++
-				}
+			referencedHosts[strings.ToLower(tgtHost)] = true
+			// The replica this source names is in no agent's report. Shown
+			// as-is, in every case: a deleted replica on a healthy host,
+			// and a reference to a host nobody reports under that exact
+			// name, both mean these syncs have nowhere to land. Matching
+			// is deliberately exact (case-insensitive only): resolving a
+			// short name against an FQDN report would hide the
+			// misconfiguration instead of showing it.
+			if _, ok := byRef[strings.ToLower(tgtHost+":"+tgtVM)]; !ok {
+				peer := strings.ToLower(tgtHost)
+				known := hostsWithAgents[peer]
+				d.MissingTargets = append(d.MissingTargets, MissingTarget{
+					SourceHost: host,
+					SourceVM:   dom.Name,
+					TargetHost: tgtHost,
+					TargetVM:   tgtVM,
+					PeerKnown:  known,
+					PeerStale:  known && !hostFresh[peer],
+				})
+				d.Counts["missing-target"]++
+			}
 			}
 
 			default:
