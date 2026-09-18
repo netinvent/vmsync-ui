@@ -123,7 +123,10 @@ Ordered worst-first, because the page is read to find what needs attention.
   replica is in no agent's report under that exact name — deleted, never
   created, misspelled, or a short name where the agent reports an FQDN —
   has nowhere for its syncs to land. Each row is shown verbatim, with a
-  note saying whether any agent reports under that name at all.
+  note saying whether any agent reports under that name at all. A
+  reference is skipped when the source already has a pair row for a target
+  under the same VM name: the pair proves the copy exists, so what remains
+  is a spelling difference, not a missing copy.
 - References match **exactly** (case-insensitive only): `hypervisor01` in
   hand-typed vmsync metadata does not resolve to an agent reporting as
   `hypervisor01.domain.tld`. That surfaces as rows to fix — align the names

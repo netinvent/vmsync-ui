@@ -182,13 +182,14 @@ type Dashboard struct {
 	// some domain, but which no enrolled agent reports for. Those are the
 	// blind spots in the picture.
 	MissingAgents []string
-	// MissingTargets names sources whose metadata points at a target no
-	// reporting agent has under that exact name. The replica was deleted,
-	// renamed, never created -- or the reference itself is misspelled, or
-	// uses a short name where the agent reports an FQDN. All of those mean
-	// the syncs have nowhere to land, so every one of them is shown
-	// verbatim: matching stays exact (case-insensitive only) so a naming
-	// problem reads as a naming problem instead of being resolved away.
+	// MissingTargets names sources with a reference no report resolves,
+	// shown verbatim. The replica was deleted, never created -- or the
+	// reference itself is misspelled, or uses a short name where the agent
+	// reports an FQDN. Matching stays exact (case-insensitive only) so a
+	// naming problem reads as a naming problem instead of being resolved
+	// away. A reference is skipped when the source already has a pair row
+	// for a target under the same VM name: the pair proves the copy exists,
+	// so the spelling difference is not a missing copy.
 	MissingTargets []MissingTarget
 	GeneratedAt   string
 }
@@ -268,6 +269,10 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 	}
 
 	referencedHosts := map[string]bool{}
+	// missingCandidates holds dangling source-to-target references until
+	// the pairs are all built: a reference the pairs already cover is a
+	// spelling difference, not a missing copy, and must not be reported.
+	var missingCandidates []MissingTarget
 
 	for _, a := range agents {
 		rep, ok := reports[a.ID]
@@ -328,17 +333,16 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					continue
 				}
 			referencedHosts[strings.ToLower(tgtHost)] = true
-			// The replica this source names is in no agent's report. Shown
-			// as-is, in every case: a deleted replica on a healthy host,
-			// and a reference to a host nobody reports under that exact
-			// name, both mean these syncs have nowhere to land. Matching
-			// is deliberately exact (case-insensitive only): resolving a
+			// The replica this source names is in no agent's report. Kept
+			// as a candidate for now: whether it is reported below depends
+			// on the pairs, which are still being built. Matching is
+			// deliberately exact (case-insensitive only): resolving a
 			// short name against an FQDN report would hide the
 			// misconfiguration instead of showing it.
 			if _, ok := byRef[strings.ToLower(tgtHost+":"+tgtVM)]; !ok {
 				peer := strings.ToLower(tgtHost)
 				known := hostsWithAgents[peer]
-				d.MissingTargets = append(d.MissingTargets, MissingTarget{
+				missingCandidates = append(missingCandidates, MissingTarget{
 					SourceHost: host,
 					SourceVM:   dom.Name,
 					TargetHost: tgtHost,
@@ -346,7 +350,6 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					PeerKnown:  known,
 					PeerStale:  known && !hostFresh[peer],
 				})
-				d.Counts["missing-target"]++
 			}
 			}
 
@@ -365,6 +368,28 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 		}
 	}
 	sort.Strings(d.MissingAgents)
+
+	// A dangling reference is only alarming when the source has no pair row
+	// for a target under the same VM name: a pair proves the copy exists
+	// and shows its freshness, so claiming "no copy" alongside it would
+	// contradict the board. The usual cause is the two metadata directions
+	// spelling the peer differently (short on the source side, FQDN on the
+	// target side); both spellings stay on display in their rows' names.
+	// Matching here is exact like everywhere else -- no hostname is
+	// transformed to make the comparison succeed.
+	covered := map[string]bool{}
+	for _, p := range d.Pairs {
+		covered[p.SourceHost+"\x00"+p.SourceVM+"\x00"+p.TargetVM] = true
+	}
+	for _, m := range missingCandidates {
+		if covered[m.SourceHost+"\x00"+m.SourceVM+"\x00"+m.TargetVM] {
+			continue
+		}
+		d.MissingTargets = append(d.MissingTargets, m)
+	}
+	if len(d.MissingTargets) > 0 {
+		d.Counts["missing-target"] = len(d.MissingTargets)
+	}
 
 	// Worst first: an availability page is read to find what needs
 	// attention, so burying a critical pair under a page of healthy ones

@@ -363,9 +363,9 @@ func TestBuildDashboardMissingTargetNotesAStalePeer(t *testing.T) {
 
 func TestBuildDashboardHostMatchingIsExact(t *testing.T) {
 	// Short refs against FQDN reports do NOT resolve: normalising them
-	// would hide a misconfiguration instead of showing it. Every join on
-	// this page treats "hyper02p" and "hyper02p.domain.local" as different
-	// hosts, and every dangling reference shows up verbatim.
+	// would hide a misconfiguration instead of showing it. This mirrors a
+	// real estate where the two metadata directions spell the peer
+	// differently -- short on the source side, FQDN on the target side.
 	agents := []store.Agent{
 		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
@@ -376,7 +376,7 @@ func TestBuildDashboardHostMatchingIsExact(t *testing.T) {
 			{Name: "haproxy01p.domain.local", ReplicaTargets: []string{"hyper02p:haproxy01p.domain.local"}, Status: "ok", Active: true},
 		}},
 		"tgt": {Hostname: "hyper02p.domain.local", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
-			{Name: "hap01l.test.local", ReplicaSource: "hyper01p:hap01l.test.local", Status: "ok", AgeSeconds: 60},
+			{Name: "hap01l.test.local", ReplicaSource: "hyper01p.domain.local:hap01l.test.local", Status: "ok", AgeSeconds: 60},
 		}},
 	}
 
@@ -384,25 +384,67 @@ func TestBuildDashboardHostMatchingIsExact(t *testing.T) {
 	if len(d.Pairs) != 1 {
 		t.Fatalf("got %d pairs, want the one target hyper02p reported", len(d.Pairs))
 	}
-	if d.Pairs[0].SourceSeen {
-		t.Error("SourceSeen is true although nothing reports under the short name the replica_source uses")
+	if !d.Pairs[0].SourceSeen {
+		t.Error("SourceSeen is false although hyper01p reports the source under its exact FQDN")
 	}
-	if len(d.MissingAgents) != 2 || d.MissingAgents[0] != "hyper01p" || d.MissingAgents[1] != "hyper02p" {
-		t.Errorf("MissingAgents = %v, want both short names -- neither resolves to an FQDN report", d.MissingAgents)
+	// Only the short target name reads as agent-less: the FQDN source
+	// reference resolves exactly.
+	if len(d.MissingAgents) != 1 || d.MissingAgents[0] != "hyper02p" {
+		t.Errorf("MissingAgents = %v, want just [hyper02p]", d.MissingAgents)
 	}
-	// Both sources dangle: haproxy01p's replica is genuinely gone, and
-	// hap01l's resolves to nothing either under exact matching. Each row
-	// names its misconfiguration instead of guessing.
-	if len(d.MissingTargets) != 2 {
-		t.Fatalf("MissingTargets = %+v, want both dangling references shown as-is", d.MissingTargets)
+	// hap01l's dangling short ref is covered by its pair -- the copy
+	// demonstrably exists -- so only the genuinely replica-less
+	// haproxy01p is reported.
+	if len(d.MissingTargets) != 1 {
+		t.Fatalf("MissingTargets = %+v, want only the haproxy01p reference", d.MissingTargets)
 	}
-	for _, m := range d.MissingTargets {
-		if m.PeerKnown {
-			t.Errorf("%+v claims a known peer although no agent reports under %q", m, m.TargetHost)
-		}
-		if got := m.TargetHost; got != "hyper02p" {
-			t.Errorf("target host displays as %q, want the reference as written, not the report's FQDN", got)
-		}
+	m := d.MissingTargets[0]
+	if m.SourceVM != "haproxy01p.domain.local" {
+		t.Errorf("missing target names source %q, want haproxy01p.domain.local", m.SourceVM)
+	}
+	if m.PeerKnown {
+		t.Errorf("%+v claims a known peer although no agent reports under %q", m, m.TargetHost)
+	}
+	if got := m.TargetHost; got != "hyper02p" {
+		t.Errorf("target host displays as %q, want the reference as written, not the report's FQDN", got)
+	}
+	if d.Counts["missing-target"] != 1 {
+		t.Errorf("missing-target count = %d, want 1", d.Counts["missing-target"])
+	}
+}
+
+func TestBuildDashboardMissingTargetDefersToAnExistingPair(t *testing.T) {
+	// web01 replicates to two targets but only hyper02p's replica reports.
+	// The hyper03p reference dangles, yet no row may claim "no copy": the
+	// healthy pair proves a copy exists under that VM name. A lost second
+	// copy while the first survives is a different signal than this panel;
+	// conflating the two is what made 11+1+2 add up to 14.
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01", "hyper03p:web01"}, Status: "ok", Active: true},
+		}},
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+			{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 60},
+		}},
+	}
+
+	d := BuildDashboard(agents, reports, now)
+	if len(d.Pairs) != 1 {
+		t.Fatalf("got %d pairs, want 1", len(d.Pairs))
+	}
+	// The unheard-from host is still reported once, at host level.
+	if len(d.MissingAgents) != 1 || d.MissingAgents[0] != "hyper03p" {
+		t.Fatalf("MissingAgents = %v, want [hyper03p]", d.MissingAgents)
+	}
+	if len(d.MissingTargets) != 0 {
+		t.Errorf("MissingTargets = %+v, want none -- the pair already proves web01 has a copy", d.MissingTargets)
+	}
+	if c := d.Counts["missing-target"]; c != 0 {
+		t.Errorf("missing-target count = %d, want 0", c)
 	}
 }
 
