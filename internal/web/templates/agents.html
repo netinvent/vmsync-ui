@@ -46,7 +46,7 @@
                of its own: it is a property of what this agent IS, and it is
                the one thing on this page that says a green row is not running
                anything this console publishes. */}}
-          <td class="mono">{{.Hostname}}{{if .Revoked}} <span class="pill s-none">revoked</span>{{end}}{{if .ReadOnly}} <span class="pill s-warn">monitor</span>{{end}}</td>
+          <td class="mono">{{.Hostname}}{{if .Revoked}} <span class="pill s-none">revoked</span>{{end}}{{if .ReadOnly}} <span class="pill s-warn">monitor</span>{{else if eq .Mode "controlled"}} <span class="pill s-ok">controlled</span>{{end}}</td>
           <td class="num">{{.LastSeen}}{{if .Stale}} <span class="pill s-warn">stale</span>{{end}}</td>
           <td class="num">{{.ConfigAge}}</td>
           <td class="num">{{.Domains}}</td>

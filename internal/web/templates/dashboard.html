@@ -228,7 +228,7 @@
       <tbody>
         {{range $d.Agents}}
         <tr>
-          <td class="mono">{{.Hostname}}{{if .Revoked}} <span class="pill s-none">revoked</span>{{end}}{{if .ReadOnly}} <span class="pill s-warn">monitor</span>{{end}}</td>
+          <td class="mono">{{.Hostname}}{{if .Revoked}} <span class="pill s-none">revoked</span>{{end}}{{if .ReadOnly}} <span class="pill s-warn">monitor</span>{{else if eq .Mode "controlled"}} <span class="pill s-ok">controlled</span>{{end}}</td>
           <td class="num">{{.LastSeen}}{{if .Stale}} <span class="pill s-warn">stale</span>{{end}}</td>
           <td class="num">{{.ConfigAge}}</td>
           <td class="num">{{.Domains}}</td>
