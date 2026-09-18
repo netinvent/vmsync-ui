@@ -328,7 +328,7 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>When</th><th>What</th><th>VM</th><th>By</th><th>State</th>{{if $user.IsAdmin}}<th></th>{{end}}</tr>
+        <tr><th>When</th><th>What</th><th>VM</th><th>Hypervisor</th><th>By</th><th>State</th>{{if $user.IsAdmin}}<th></th>{{end}}</tr>
       </thead>
       <tbody>
         {{range $v.Operations}}
@@ -336,6 +336,7 @@
           <td>{{.Created}}<div class="warnline">{{.Age}} ago</div></td>
           <td class="mono">{{.Kind}}</td>
           <td class="mono">{{.VM}}</td>
+          <td class="mono">{{.Host}}</td>
           <td>{{.CreatedBy}}</td>
           <td>
             <span class="pill {{.StateClass}}">{{.State}}</span>

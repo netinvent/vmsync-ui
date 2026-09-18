@@ -456,6 +456,11 @@ func (r FailoverRow) RestorePointViews() []RestorePointView {
 // OperationView is one issued operation, rendered.
 type OperationView struct {
 	store.OperationRecord
+	// Host is the hypervisor the operation runs on, resolved from the
+	// record's agent ID. A VM name alone does not say which end of a pair
+	// is about to change, and during an incident that is the first thing
+	// an operator needs.
+	Host string
 	// State is the single word describing where this stands, collapsing the
 	// record's several independent fields into the one thing an operator
 	// wants: pending, cancelled, expired, or whatever the agent reported.
@@ -576,6 +581,19 @@ func BuildFailoverView(
 	}
 	v.NoAgents = live == 0
 
+	// hostByAgent resolves operation targets to hypervisor names for the
+	// operations table below. Report hostname first (what the host calls
+	// itself now), enrolled name as fallback. Revoked agents stay in:
+	// the operation ran, or is still waiting, on that host regardless.
+	hostByAgent := map[string]string{}
+	for _, a := range agents {
+		name := a.Hostname
+		if rep, ok := reports[a.ID]; ok && rep.Hostname != "" {
+			name = rep.Hostname
+		}
+		hostByAgent[a.ID] = name
+	}
+
 	for _, a := range agents {
 		if a.Revoked {
 			continue
@@ -673,6 +691,14 @@ func BuildFailoverView(
 			OperationRecord: rec,
 			Created:         time.Unix(rec.CreatedAtUnix, 0).UTC().Format("2006-01-02 15:04 UTC"),
 			Age:             humanAge(now.Sub(time.Unix(rec.CreatedAtUnix, 0))),
+		}
+		// An operation against an agent ID nobody has heard of should not
+		// happen -- agents are revoked, never deleted -- but a blank cell
+		// would be worse than the raw ID if it ever did.
+		if h, ok := hostByAgent[rec.AgentID]; ok && h != "" {
+			ov.Host = h
+		} else {
+			ov.Host = rec.AgentID
 		}
 		switch {
 		case rec.CancelledAtUnix != 0:

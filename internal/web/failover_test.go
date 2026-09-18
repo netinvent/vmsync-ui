@@ -600,6 +600,47 @@ func TestOperationsListCapsHistoryButNeverHidesAPendingOne(t *testing.T) {
 	}
 }
 
+// An operation names its VM but is issued to one agent: without the
+// hypervisor beside it, the row does not say which end of a pair is about
+// to change.
+func TestOperationsShowTheHypervisorTheyRunOn(t *testing.T) {
+	agents, reports := failoverFixture()
+	ops := []store.OperationRecord{
+		{Operation: store.Operation{ID: "op-dr", Kind: store.OpPromote, VM: "web01",
+			CreatedAtUnix: now.Unix() - 30, CreatedBy: "op", NotAfterUnix: now.Unix() + 600}, AgentID: "dr"},
+		{Operation: store.Operation{ID: "op-gone", Kind: store.OpShutdown, VM: "web01",
+			CreatedAtUnix: now.Unix() - 60, CreatedBy: "op", NotAfterUnix: now.Unix() + 600}, AgentID: "no-such-agent"},
+	}
+
+	v := BuildFailoverView(agents, reports, ops, now)
+	byID := map[string]OperationView{}
+	for _, o := range v.Operations {
+		byID[o.ID] = o
+	}
+	if got := byID["op-dr"].Host; got != "hyper02p" {
+		t.Errorf("operation host = %q, want the hypervisor its agent reports for", got)
+	}
+	// No agent, no hostname to resolve -- but a blank cell would be worse
+	// than the raw ID it was issued to.
+	if got := byID["op-gone"].Host; got != "no-such-agent" {
+		t.Errorf("operation host = %q, want the agent ID as fallback", got)
+	}
+
+	s := testServer(t)
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+	if !strings.Contains(html, "Hypervisor") || !strings.Contains(html, "hyper02p") {
+		t.Error("the rendered operations table does not name the hypervisor")
+	}
+}
+
 // The gap this closes. From metadata alone a fenced VM and one an operator
 // paused are both just `paused`, and a fence that FAILED leaves no trace in
 // libvirt at all -- only a VM still running beside a promoted copy, which is
