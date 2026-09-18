@@ -120,11 +120,14 @@ Ordered worst-first, because the page is read to find what needs attention.
 - **Hosts with no agent** are listed as blind spots. "I cannot see this" must
   never render as "this is healthy".
 - **Target missing** gets its own alarm-styled panel. A source whose named
-  replica is in no agent's report — deleted, renamed or never created on a
-  host that *is* reporting — has no copy anywhere, and pair rows built from
-  the target side can never show it. (A target host with no agent at all
-  stays under "Hosts with no agent" instead, so one situation is not
-  reported twice.)
+  replica is in no agent's report under that exact name — deleted, never
+  created, misspelled, or a short name where the agent reports an FQDN —
+  has nowhere for its syncs to land. Each row is shown verbatim, with a
+  note saying whether any agent reports under that name at all.
+- References match **exactly** (case-insensitive only): `hypervisor01` in
+  hand-typed vmsync metadata does not resolve to an agent reporting as
+  `hypervisor01.domain.tld`. That surfaces as rows to fix — align the names
+  and the rows clear — rather than being silently correlated away.
 - **Behind** is the replication lag — how much you would lose. A never-synced
   target shows `—` rather than `0`, which would read as "just synced".
 - **promoted** and **paused** get a distinct neutral colour. They are

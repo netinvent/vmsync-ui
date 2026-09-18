@@ -239,7 +239,7 @@ func TestBuildDashboardFlagsSourceWithNoMatchingTarget(t *testing.T) {
 	}
 	reports := map[string]store.Report{
 		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
-			{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok", Active: true},
+			{Name: "haproxy01p.domain.local", ReplicaTargets: []string{"hyper02p:haproxy01p.domain.local"}, Status: "ok", Active: true},
 		}},
 		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
 			{Name: "hap01l.test.local", ReplicaSource: "hyper01p:hap01l.test.local", Status: "ok", AgeSeconds: 60},
@@ -257,10 +257,10 @@ func TestBuildDashboardFlagsSourceWithNoMatchingTarget(t *testing.T) {
 		t.Fatalf("got %d missing targets, want exactly the haproxy01p reference", len(d.MissingTargets))
 	}
 	m := d.MissingTargets[0]
-	if m.SourceHost != "hyper01p" || m.SourceVM != "haproxy01p.badmin.local" {
-		t.Errorf("missing target names source %+v, want hyper01p:haproxy01p.badmin.local", m)
+	if m.SourceHost != "hyper01p" || m.SourceVM != "haproxy01p.domain.local" {
+		t.Errorf("missing target names source %+v, want hyper01p:haproxy01p.domain.local", m)
 	}
-	if m.TargetHost != "hyper02p" || m.TargetVM != "haproxy01p.badmin.local" {
+	if m.TargetHost != "hyper02p" || m.TargetVM != "haproxy01p.domain.local" {
 		t.Errorf("missing target names target %q:%q, want the reference as the source's metadata wrote it", m.TargetHost, m.TargetVM)
 	}
 	if !m.PeerKnown {
@@ -283,7 +283,7 @@ func TestBuildDashboardFlagsSourceWithNoMatchingTarget(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	html := buf.String()
-	if !strings.Contains(html, "Target missing") || !strings.Contains(html, "haproxy01p.badmin.local") {
+	if !strings.Contains(html, "Target missing") || !strings.Contains(html, "haproxy01p.domain.local") {
 		t.Error("the source replicating nowhere is not called out on the page")
 	}
 	if !strings.Contains(html, "missing target") {
@@ -298,7 +298,7 @@ func TestBuildDashboardMissingTargetShowsAnUnknownPeer(t *testing.T) {
 	// which source is affected.
 	agents := []store.Agent{{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()}}
 	reports := map[string]store.Report{"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
-		{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok"},
+		{Name: "haproxy01p.domain.local", ReplicaTargets: []string{"hyper02p:haproxy01p.domain.local"}, Status: "ok"},
 	}}}
 
 	d := BuildDashboard(agents, reports, now)
@@ -342,7 +342,7 @@ func TestBuildDashboardMissingTargetNotesAStalePeer(t *testing.T) {
 	}
 	reports := map[string]store.Report{
 		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
-			{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok"},
+			{Name: "haproxy01p.domain.local", ReplicaTargets: []string{"hyper02p:haproxy01p.domain.local"}, Status: "ok"},
 		}},
 		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Add(-time.Hour).Unix(), Domains: []store.ReportDomain{
 			{Name: "other", Status: "unreplicated"},
@@ -364,18 +364,18 @@ func TestBuildDashboardMissingTargetNotesAStalePeer(t *testing.T) {
 func TestBuildDashboardHostMatchingIsExact(t *testing.T) {
 	// Short refs against FQDN reports do NOT resolve: normalising them
 	// would hide a misconfiguration instead of showing it. Every join on
-	// this page treats "hyper02p" and "hyper02p.badmin.local" as different
+	// this page treats "hyper02p" and "hyper02p.domain.local" as different
 	// hosts, and every dangling reference shows up verbatim.
 	agents := []store.Agent{
 		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p.badmin.local", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p.domain.local", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
 			{Name: "hap01l.test.local", ReplicaTargets: []string{"hyper02p:hap01l.test.local"}, Status: "ok", Active: true},
-			{Name: "haproxy01p.badmin.local", ReplicaTargets: []string{"hyper02p:haproxy01p.badmin.local"}, Status: "ok", Active: true},
+			{Name: "haproxy01p.domain.local", ReplicaTargets: []string{"hyper02p:haproxy01p.domain.local"}, Status: "ok", Active: true},
 		}},
-		"tgt": {Hostname: "hyper02p.badmin.local", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
+		"tgt": {Hostname: "hyper02p.domain.local", ReportedAtUnix: now.Unix(), Domains: []store.ReportDomain{
 			{Name: "hap01l.test.local", ReplicaSource: "hyper01p:hap01l.test.local", Status: "ok", AgeSeconds: 60},
 		}},
 	}
