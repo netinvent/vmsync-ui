@@ -95,6 +95,61 @@ func TestAnAbsentExitCodeIsNotSuccess(t *testing.T) {
 	}
 }
 
+// The other end of the CI-01 fix: a verification failure is recorded on the
+// replica's own domain metadata, and this is the only path by which it
+// reaches an operator's screen.
+//
+// Raw JSON with DisallowUnknownFields, exactly as the report endpoint
+// decodes it, and for the same reason the fence test in internal/api uses
+// raw JSON: marshalling from the type under test would agree with itself no
+// matter what the agent actually sends, so it could not catch a name that
+// does not match. A name that does not match here does not lose this field
+// alone -- it rejects the agent's ENTIRE report.
+func TestAVerificationFailureDecodesFromTheAgentsWireFormat(t *testing.T) {
+	const body = `{
+	  "name": "db01",
+	  "active": false,
+	  "replica_source": "hyper01p:db01",
+	  "failure_count": 0,
+	  "verify_state": "failed",
+	  "verify_failed_at_unix": 1799990000,
+	  "status": "ok",
+	  "age_seconds": 120
+	}`
+
+	var d ReportDomain
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&d); err != nil {
+		t.Fatalf("decode: %v -- a name that does not match the agent's rejects the whole report, "+
+			"which in production looks like every upgraded host going offline at once", err)
+	}
+	if d.VerifyState != "failed" {
+		t.Errorf("VerifyState = %q, want %q -- without it a replica known not to match its source "+
+			"is promoted with no warning", d.VerifyState, "failed")
+	}
+	if d.VerifyFailedAtUnix != 1799990000 {
+		t.Errorf("VerifyFailedAtUnix = %d, want 1799990000; the date is what separates a failure "+
+			"from ten minutes ago from one three weeks old", d.VerifyFailedAtUnix)
+	}
+}
+
+// The other half, and the one that matters more: a domain nobody has ever
+// verified must decode to no finding at all. The fields are omitempty on the
+// wire, so almost every domain in an estate arrives without them, and a zero
+// value that read as a failure would flag the whole fleet -- an alarm on
+// every row is an alarm nobody reads.
+func TestADomainWithNoVerificationFindingCarriesNone(t *testing.T) {
+	var d ReportDomain
+	if err := json.Unmarshal([]byte(`{"name":"web01","active":true,"failure_count":0,"status":"ok","age_seconds":30}`), &d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.VerifyState != "" || d.VerifyFailedAtUnix != 0 {
+		t.Errorf("an unverified domain decoded to VerifyState:%q VerifyFailedAtUnix:%d, want neither",
+			d.VerifyState, d.VerifyFailedAtUnix)
+	}
+}
+
 // A degraded run is a SUCCESS that still needs somebody. Succeeded() must
 // keep saying true -- the sync did work, and anything keyed off it (staleness,
 // failure counting, -reinit-after-failures) must not start treating a frozen

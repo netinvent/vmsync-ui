@@ -158,12 +158,33 @@
       <tbody>
         {{range $d.Pairs}}
         <tr>
-          <td><span class="pill {{statusClass .Status}}">{{.Status}}</span></td>
+          <td><span class="pill {{statusClass .Status}}">{{.Status}}</span>
+            {{/* A SECOND pill beside the status, never instead of it. The
+                 agent now assesses a recorded verification failure as
+                 critical, so the status word does move -- but "critical" is
+                 also what a badly lagging replica reads as, and the two call
+                 for opposite actions: one needs replication fixed, the other
+                 needs the copy rebuilt and re-proven before anyone fails
+                 over to it. This pill is what says which kind of critical
+                 this row is. */}}
+            {{if .VerifyFailed}}<span class="pill s-crit">verify failed</span>{{end}}
+          </td>
           <td class="mono">{{.SourceHost}}:{{.SourceVM}}
             {{if not .SourceSeen}}<div class="warnline">no agent reporting this source</div>{{end}}
           </td>
           <td class="mono">{{.TargetHost}}:{{.TargetVM}}
             {{if .TargetActive}}<div class="warnline">target is running</div>{{end}}
+            {{if .VerifyFailed}}
+              <div class="warnline">
+                verification found this copy differing from its source{{if .VerifyFailedAt}} on {{.VerifyFailedAt}}{{end}}
+                and the finding has not been cleared — it is known not to match, so promoting it
+                would serve data already proven wrong. vmsync refuses every sync into it while
+                the finding stands, a plain full resync included; the repair is a sync set to
+                recopy once and re-verify, which clears it only if that second comparison passes.
+                A force-clean resync is the one thing that still goes through, and it discards the
+                finding without re-verifying rather than clearing it.
+              </div>
+            {{end}}
           </td>
           <td class="num">{{.AgeString}}</td>
           <td class="num">{{if .FailureCount}}{{.FailureCount}}{{else}}—{{end}}</td>

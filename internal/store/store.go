@@ -324,6 +324,41 @@ type ReportDomain struct {
 	// Prometheus metrics.
 	Fenced *ReportFenced `json:"fenced,omitempty"`
 
+	// VerifyState and VerifyFailedAtUnix are a recorded verification
+	// failure: a -verify run compared this replica's contents against its
+	// own source, found them different, and vmsync stamped the verdict onto
+	// the domain so that the finding outlives the run that made it.
+	//
+	// Presence IS the state. The only value ever written is "failed" --
+	// there is deliberately no "passed", because such a value would go stale
+	// the instant the replica changed and would then read as fresh
+	// assurance.
+	//
+	// This is a different fact from every other health signal reported here,
+	// and the distinction is the whole reason it is worth carrying.
+	// FailureCount says the last sync ATTEMPT did not finish, so the copy
+	// may be BEHIND; this says an attempt finished and the copy does not
+	// match what the source holds, so it may be WRONG. Promoting such a
+	// replica serves data already known not to match.
+	//
+	// The reported Status does not make this field redundant, in either
+	// direction. An agent old enough not to assess the finding still reports
+	// the domain as ok, and this console must not depend on the far end
+	// having been upgraded to tell the truth about it. A current agent does
+	// raise the domain to critical -- but so does a replica that is merely
+	// far behind, and the two want opposite responses: one needs replication
+	// repaired, the other needs the copy rebuilt and re-proven before anyone
+	// fails over to it. Carrying the verdict itself is what lets this console
+	// say which of the two a row is.
+	//
+	// UPGRADE ORDER: as with RestorePoints below, these must exist here
+	// before any agent that sends them is deployed. The report body is
+	// decoded with DisallowUnknownFields, so an agent upgraded first has its
+	// ENTIRE report rejected -- domains, roles, sync results and all -- not
+	// just these two fields. Upgrade the UI, then the agents.
+	VerifyState        string `json:"verify_state,omitempty"`
+	VerifyFailedAtUnix int64  `json:"verify_failed_at_unix,omitempty"`
+
 	Disks []ReportDisk `json:"disks,omitempty"`
 	// RestorePoints is what this replica can be rolled back to, newest
 	// first.

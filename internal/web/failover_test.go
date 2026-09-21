@@ -107,8 +107,15 @@ func failoverFixture() ([]store.Agent, map[string]store.Report) {
 				// A plain replica, and the storage under it has less room
 				// than the domain occupies -- so keeping the displaced copy
 				// on an inversion would not fit.
+				//
+				// It also carries a recorded verification failure, which
+				// makes it the dangerous row on this page: stopped, quiet,
+				// no role, no fence, and therefore offering a Promote
+				// control -- on a copy already known not to match its
+				// source.
 				{
 					Name: "db01", Active: false, ReplicaSource: "hyper01p:db01",
+					VerifyState: "failed", VerifyFailedAtUnix: now.Unix() - 7200,
 					Disks: []store.ReportDisk{{Path: "/replicas/db01.qcow2", AllocatedBytes: 5 << 30}},
 				},
 				{Name: "mail01", Active: false, Role: store.RoleTarget, ReplicaSource: "hyper01p:mail01"},
@@ -509,6 +516,135 @@ func TestFailoverPageRendersItsControls(t *testing.T) {
 	// dead end an operator reaches by following the page's own suggestion.
 	if strings.Contains(html, `<option value="promoted"`) {
 		t.Error("set-role must not offer `promoted`: promotion has preconditions that writing the role would skip")
+	}
+}
+
+// The same finding, on the page where a promotion is actually decided.
+//
+// This row is the dangerous one precisely because it looks unremarkable:
+// stopped, no role, a recent last sync, and therefore offered a Promote
+// control like any other replica. The marker and the warning are all that
+// stand between somebody working quickly and a guest booted onto data that
+// was already known not to match its source.
+func TestThePromotePathWarnsThatTheReplicaIsKnownNotToMatch(t *testing.T) {
+	s := testServer(t)
+	agents, reports := failoverFixture()
+	v := BuildFailoverView(agents, reports, failoverOperationFixture(), now)
+
+	bad := rowFor(t, v, "hyper02p", "db01")
+	if !bad.VerifyFailed() {
+		t.Fatal("the row does not carry the reported verification failure, so the page cannot show it")
+	}
+	if bad.VerifyFailedAt() == "" {
+		t.Error("the date is not exposed; when the comparison failed is half of what an operator needs")
+	}
+	// The button stays. This layer reports and warns; vmsync itself refuses
+	// the promotion. Hiding the control would claim an enforcement this
+	// console does not perform -- and would take away the one path that
+	// exists for the case where a wrong copy is the only copy left.
+	if !bad.CanPromote() {
+		t.Error("the promote control was withdrawn; the UI warns and the engine refuses, not the other way round")
+	}
+	if clean := rowFor(t, v, "hyper02p", "mail01"); clean.VerifyFailed() {
+		t.Error("a replica with no recorded failure reports one")
+	}
+
+	var buf strings.Builder
+	err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	for _, want := range []string{
+		"verify failed",      // the marker itself
+		bad.VerifyFailedAt(), // and when it happened
+		"found the contents differing",
+		// The sentence that separates this from every other caution on the
+		// page: not "this copy may be old" but "this copy is wrong".
+		"known not to match its source",
+		"data already proven wrong",
+		// And what force actually does, since it is the only way past
+		// vmsync's own refusal and reads as a retry button otherwise.
+		"changes what vmsync allows, not what the copy contains",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the rendered page is missing %q", want)
+		}
+	}
+
+	// Three times, and each one is a different reader in a different place:
+	// the replica's own row, its collapsed Promote control, and the SOURCE's
+	// row, which is where the resync controls live. Nowhere on the rows with
+	// no finding. A disclosure hides everything inside it, so a warning that
+	// appeared only in an opened form would reach nobody who had already
+	// decided.
+	if n := strings.Count(html, "verify failed"); n != 3 {
+		t.Errorf("the marker appears %d times, want 3 (the replica row, its promote control, and the source row that offers the resyncs) for the one failing replica", n)
+	}
+
+	// Pinned separately from the strings above, which the promote cell also
+	// contains: without this, deleting the row's own explanation leaves the
+	// whole suite green because the promote control happens to repeat every
+	// phrase it was checked for. Once on the replica's row, once in its
+	// promote control.
+	if n := strings.Count(html, "found the contents differing"); n != 2 {
+		t.Errorf("the dated explanation appears %d times, want 2 (the replica's row and its promote control)", n)
+	}
+}
+
+// The controls that act on a verification failure are on the SOURCE's row --
+// CanReinit and CanForceClean both require IsSource -- so that row has to
+// carry the finding too.
+//
+// Force clean is the sharp end of this: it is the one path vmsync lets past
+// the finding, and it does not repair the copy, it drops the record without
+// re-verifying. An operator reaching for it from a row that never mentioned
+// a verification failure is throwing away evidence they were never shown.
+func TestTheSourceRowShowsTheReplicasVerificationFailure(t *testing.T) {
+	s := testServer(t)
+	agents, reports := failoverFixture()
+	v := BuildFailoverView(agents, reports, failoverOperationFixture(), now)
+
+	src := rowFor(t, v, "hyper01p", "db01")
+	if !src.PeerVerifyFailed() {
+		t.Fatal("the source row does not carry its replica's recorded verification failure, so the row offering the resyncs says nothing about it")
+	}
+	if src.PeerVerifyFailedAt() == "" {
+		t.Error("the date of the replica's failure is not exposed on the source row")
+	}
+	if !src.CanForceClean() {
+		t.Fatal("this fixture is meant to offer force-clean on the source row; without it the warning below has nothing to attach to")
+	}
+	if other := rowFor(t, v, "hyper01p", "mail01"); other.PeerVerifyFailed() {
+		t.Error("a source whose replica carries no finding reports one")
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	for _, want := range []string{
+		// On the row itself, beside the peer reference.
+		"and found differing",
+		src.PeerVerifyFailedAt(),
+		// And inside the control that would discard the finding.
+		"This also discards a recorded verification failure.",
+		"drops the record without re-verifying",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the rendered page is missing %q, so the source row can discard a verification failure without showing it", want)
+		}
 	}
 }
 

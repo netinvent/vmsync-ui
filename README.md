@@ -24,6 +24,13 @@ collects on its next poll and carries out itself. The console never opens a
 session to a hypervisor; it publishes an instruction, and the agent that owns
 the host decides whether to honour it.
 
+The same split is why a warning here is only ever a warning. When the failover
+page says a replica is known not to match its source, it is repeating a verdict
+vmsync wrote and vmsync enforces — the engine refuses that promotion whatever
+this page shows. So the control stays offered rather than being withdrawn:
+taking it away would hide the explanation without removing the ability, since
+the same command remains available on the hypervisor itself.
+
 The one thing to understand about the schedule is that it names *when*, not
 *whether*. Removing an entry stops the timer; it does not stop anything else
 invoking vmsync for that VM. To make a VM genuinely refuse to be
@@ -136,11 +143,24 @@ Ordered worst-first, because the page is read to find what needs attention.
 - **promoted** and **paused** get a distinct neutral colour. They are
   deliberate states; if a planned failover turned the board red, people would
   learn to ignore red.
+- **Verify failed** is a second pill *beside* the status, never instead of it,
+  with the date the finding was recorded. The status answers how far **behind**
+  a copy is and goes on saying `ok` for one that was compared against its
+  source and did not match, so folding the two together would make the row
+  choose between two facts that are both true — and dropping the marker would
+  let a copy known to be wrong read as healthy. The target cell spells out what
+  it means: vmsync refuses every sync into the replica while the finding
+  stands, a plain full resync included, and the repair is a sync set to recopy
+  once and re-verify, which clears it only if that second comparison passes.
 - Reasons appear on the row, not behind a click.
 
 Freshness always comes from the **target**, because that is where vmsync
 writes `last_sync`, `last_checkpoint` and `failure_count`. A source's own
-metadata records where it replicates to, never when.
+metadata records where it replicates to, never when. The verification record
+(`verify_state`, `verify_failed_at`) is read from the target and the same
+report, but it is not a freshness fact at all: freshness says how far behind a
+copy is, the record says it does not match, and a copy that is wrong does not
+become right by being recent.
 
 ## The agent-facing API
 
@@ -311,13 +331,22 @@ audit entry hangs open forever with nothing saying what became of it.
 has its *entire* report rejected — domains, roles and sync results included —
 and the symptom looks like every upgraded host going offline at once.
 
-This has applied to `operation_results`, and applies again to the fence
-fields (`fence_id`, `fence_source`, `fence_armed_at_unix`, `fence_armed_by`
-and the `fenced` object). It applies to every future addition too, which is
+This has applied to `operation_results`, to the fence fields (`fence_id`,
+`fence_source`, `fence_armed_at_unix`, `fence_armed_by` and the `fenced`
+object), and now to the verification record (`verify_state`,
+`verify_failed_at_unix`). It applies to every future addition too, which is
 why both halves of the contract are pinned by tests that name the strings
-literally: `TestAReportCarryingFenceStateIsAccepted` here, and
-`TestSendReportCarriesFenceStateUnderTheAgreedNames` in the agent. Changing
+literally: `TestAReportCarryingFenceStateIsAccepted` and
+`TestAReportCarryingAVerificationFailureIsAccepted` here, and
+`TestSendReportCarriesFenceStateUnderTheAgreedNames` and
+`TestSendReportCarriesVerifyStateUnderTheAgreedNames` in the agent. Changing
 one without the other fails there rather than in the field.
+
+Both verification fields are `omitempty`, which is why the order still
+matters in spite of how rare the finding is: a report from an agent ahead of
+its UI decodes cleanly for every healthy domain and is rejected outright the
+first time a replica fails a verification — the symptom would arrive weeks
+after the upgrade that caused it, on exactly the host with something wrong.
 
 **The other direction is lenient, deliberately.** An agent decodes the
 config it polls without `DisallowUnknownFields`, so a newer UI sending a
@@ -365,6 +394,41 @@ An agent cannot see another agent. A source's own metadata records where it
 replicates *to*, never that the target has since been promoted — so the
 Invert action, and the split-brain banner, exist only because the control
 plane hears from both hosts and cross-references them.
+
+### A replica known not to match its source
+
+A `-verify` that found a replica's contents differing from its source leaves
+the verdict on the domain, and the agent reports it. This page shows it four
+times over, which is deliberate:
+
+- a **verify failed** pill on the row, beside the role rather than folded into
+  it — a replica that failed verification still carries an ordinary role and an
+  ordinary age, and this is the only thing on the row saying its contents are
+  wrong rather than old;
+- a dated warning under the row's contents line, naming the peer it was
+  compared against and saying that vmsync refuses every sync into it while the
+  finding stands — the **Full resync** offered here included — so the repair is
+  a sync set to *recopy once, then re-verify*;
+- a warning on the promote cell **outside** the collapsed control, repeated as
+  a pill on the control's own summary. Everything else in that cell collapses
+  so a row stays one line at rest, but a caution that has to be opened to be
+  read is one a hurried operator has already clicked past;
+- and the same pill and date on the **source's** row, because that is where
+  **Full resync** and **Force clean resync** are offered. Force clean is the
+  one control vmsync lets past the finding, and it does not repair the copy —
+  it drops the record without re-verifying — so its note says so where the
+  operator is about to click it.
+
+Open the control and the form says the rest: vmsync refuses the promotion on
+its own, only **force** gets past that refusal, and ticking it changes what
+vmsync allows, not what the copy contains.
+
+**The Promote button is not withdrawn.** That is the point, not an oversight.
+This console publishes instructions and enforces nothing (see *What it does,
+and what it deliberately cannot*), so withdrawing the button would not prevent
+the promotion — it would only hide it from the one place that explains what is
+wrong, while `vmsync -promote -force-promote` on the hypervisor stays exactly
+as available. The console reports and warns; the engine refuses.
 
 ### Storage, beside the decision that spends it
 

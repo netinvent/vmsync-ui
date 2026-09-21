@@ -48,6 +48,22 @@ type Pair struct {
 	Role           string
 	TargetActive   bool
 
+	// VerifyState and VerifyFailedAtUnix are the target's recorded
+	// verification failure, empty for the overwhelming majority of pairs.
+	//
+	// They belong on this row rather than anywhere else for the same reason
+	// the row is built from the target at all: vmsync writes the verdict
+	// onto the domain it compared, which is the replica. The distinction the
+	// row has to carry is between behind and wrong -- Status and AgeSeconds
+	// answer how far behind this copy is, and say nothing at all about
+	// whether it matches. Status is also the far end's judgement rather than
+	// this console's: an agent too old to assess the finding reports the
+	// domain as ok, and a current one raises it to critical, which is the
+	// same word a badly lagging replica gets. Keeping the verdict on the row
+	// is what lets the page distinguish the two without trusting either.
+	VerifyState        string
+	VerifyFailedAtUnix int64
+
 	// SourceSeen is false when no agent reported a source domain matching
 	// this target's replica_source. That is worth showing: it means either
 	// the source host has no agent, or its agent is down, and in both cases
@@ -64,6 +80,34 @@ type Pair struct {
 	// that died while its VM was running says Active:true for as long as
 	// the record survives -- which is forever.
 	SourceReportAgeSeconds int64
+}
+
+// VerifyFailed reports that this replica has been compared against its
+// source and found to differ, with the finding still outstanding.
+//
+// Presence is the state, matching how vmsync records it: the only value ever
+// written is "failed", and nothing ever writes a "passed" that could be read
+// as assurance. It is cleared only by a sync that gets past vmsync's own
+// refusal and then verifies clean, so nothing removes it by accident and
+// anything non-empty here is a finding still outstanding.
+//
+// Testing for presence rather than for the exact word is deliberate. A
+// newer vmsync writing a value this build has never heard of must still
+// flag the replica, because the one thing worse than an unexplained marker
+// is a silent absence of one.
+func (p Pair) VerifyFailed() bool { return p.VerifyState != "" }
+
+// VerifyFailedAt renders when the mismatch was found, or "" when the agent
+// reported a verdict without a date.
+//
+// The date is half of what the operator needs: a failure from ten minutes
+// ago and one from three weeks ago call for the same refusal but a very
+// different investigation, and a bare pill would leave them indistinguishable.
+func (p Pair) VerifyFailedAt() string {
+	if p.VerifyFailedAtUnix == 0 {
+		return ""
+	}
+	return time.Unix(p.VerifyFailedAtUnix, 0).UTC().Format("2006-01-02 15:04 UTC")
 }
 
 // SourceFresh reports whether the source's runtime state is current enough
@@ -306,6 +350,12 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					TargetActive:   dom.Active,
 					SourceSeen:     seen,
 					SourceActive:   seen && src.domain.Active,
+
+					// Taken from the target's own report, which is where
+					// vmsync writes the verdict. Nothing derives it: the
+					// source has no idea its copy failed a comparison.
+					VerifyState:        dom.VerifyState,
+					VerifyFailedAtUnix: dom.VerifyFailedAtUnix,
 				}
 				p.SourceReportAgeSeconds = -1
 				if seen && src.reportedAt > 0 {

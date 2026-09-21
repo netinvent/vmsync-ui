@@ -65,6 +65,16 @@ type FailoverRow struct {
 	PeerSeen   bool
 	PeerRole   string
 	PeerActive bool
+	// PeerVerifyState is the peer's own recorded verification failure, and
+	// it is carried here because the controls that act on such a finding are
+	// on the SOURCE's row rather than on the replica's: CanReinit and
+	// CanForceClean both require IsSource. Without this the row offering
+	// "Full resync" and "Force clean resync" for a replica known not to
+	// match its source is the one row on the page that says nothing about
+	// it -- and force-clean is precisely the control that throws the finding
+	// away without re-verifying.
+	PeerVerifyState        string
+	PeerVerifyFailedAtUnix int64
 
 	// IsReplica and IsSource are what this domain is in the pair, which is
 	// not the same question as its replication_role: a domain can carry no
@@ -86,6 +96,19 @@ type FailoverRow struct {
 	PromotedBy     string
 	PromotionMode  string
 	LastSyncUnix   int64
+
+	// VerifyState and VerifyFailedAtUnix are this replica's recorded
+	// verification failure: it was compared against its own source and did
+	// not match, and the finding has not been cleared.
+	//
+	// The one fact on this row that is about the replica's CONTENTS rather
+	// than about whether replication ran, which is exactly why it has to be
+	// here. Everything else a promoting operator reads -- the role, the
+	// storage, ContentsAsOf -- describes a copy that may be old. This
+	// describes one that is wrong, and a copy that is wrong does not become
+	// right by being recent.
+	VerifyState        string
+	VerifyFailedAtUnix int64
 
 	// ArmedFence is the fence THIS domain's promotion armed, so a promoted
 	// row can say whether it authorised stopping its old source. A promoted
@@ -315,6 +338,16 @@ func (r FailoverRow) SplitBrain() bool {
 
 // NeedsDecision marks the rows this page exists for, which is what puts them
 // at the top rather than leaving them to be found by scrolling.
+//
+// A recorded verification failure is deliberately NOT one of them, although
+// it is rendered as critically as they are. Every condition below is a
+// failover caught mid-flight, where the page is waiting on a decision only a
+// person can make right now; a replica known not to match its source is an
+// outstanding repair, which is a different kind of urgent -- the finding
+// keeps refusing syncs and promotions on its own until somebody rebuilds and
+// re-proves the copy, and nothing gets worse for its row not being first.
+// Ranking it up here would push the in-flight failovers down behind work
+// that has no deadline.
 func (r FailoverRow) NeedsDecision() bool {
 	return r.SplitBrain() || r.FenceFailed() || r.Role == store.RolePromoted ||
 		r.Role == store.RolePaused || r.PeerPromoted()
@@ -363,6 +396,50 @@ func (r FailoverRow) PromotedAt() string {
 		return ""
 	}
 	return time.Unix(r.PromotedAtUnix, 0).UTC().Format("2006-01-02 15:04 UTC")
+}
+
+// VerifyFailed reports that a verification run found this replica's contents
+// differing from its source, and that nobody has cleared the finding.
+//
+// Presence is the state, matching how vmsync records it -- the only value
+// ever written is "failed", and there is deliberately no "passed" to read as
+// assurance. Testing for the exact word rather than for presence would stop
+// this flagging anything the day a newer vmsync writes a different one,
+// which is the wrong way round for a signal whose entire job is to fail
+// closed.
+//
+// Unconditional, unlike FenceFailed's Active requirement, and the asymmetry
+// is not an oversight. A fence ledger entry is latched forever, so one from
+// March describes a situation somebody may long since have handled by hand;
+// this finding is cleared by vmsync itself, and only by a sync that gets
+// past its own refusal and then verifies clean. Nothing removes it by
+// accident, so for as long as an agent reports it, it is outstanding.
+func (r FailoverRow) VerifyFailed() bool { return r.VerifyState != "" }
+
+// VerifyFailedAt renders when the mismatch was found, or "" when the agent
+// reported the verdict without a date. Both are possible, and a promotion
+// decision reads differently for a failure ten minutes old and one from
+// three weeks ago.
+func (r FailoverRow) VerifyFailedAt() string {
+	if r.VerifyFailedAtUnix == 0 {
+		return ""
+	}
+	return time.Unix(r.VerifyFailedAtUnix, 0).UTC().Format("2006-01-02 15:04 UTC")
+}
+
+// PeerVerifyFailed reports whether the OTHER end of this pair is the one
+// carrying a verification failure. On a source's row that is the replica it
+// writes to, which is the row the resync controls live on.
+func (r FailoverRow) PeerVerifyFailed() bool { return r.PeerVerifyState != "" }
+
+// PeerVerifyFailedAt is PeerVerifyFailed's date, empty when the finding
+// carries none. Same format as VerifyFailedAt, because they are read side by
+// side on the same page.
+func (r FailoverRow) PeerVerifyFailedAt() string {
+	if r.PeerVerifyFailedAtUnix == 0 {
+		return ""
+	}
+	return time.Unix(r.PeerVerifyFailedAtUnix, 0).UTC().Format("2006-01-02 15:04 UTC")
 }
 
 // WasRestored reports whether this domain's disks were rolled back to a
@@ -630,6 +707,12 @@ func BuildFailoverView(
 				PromotionMode:  dom.PromotionMode,
 				LastSyncUnix:   dom.LastSyncUnix,
 
+				// Carried straight from the report, because nothing here
+				// could work it out: the verdict lives on the replica's own
+				// domain metadata, and only its agent reads it.
+				VerifyState:        dom.VerifyState,
+				VerifyFailedAtUnix: dom.VerifyFailedAtUnix,
+
 				ArmedFenceSource:  dom.FenceSource,
 				ArmedFenceAtUnix:  dom.FenceArmedAtUnix,
 				ArmedFenceArmedBy: dom.FenceArmedBy,
@@ -656,6 +739,8 @@ func BuildFailoverView(
 				row.PeerSeen = true
 				row.PeerRole = peer.Role
 				row.PeerActive = peer.Active
+				row.PeerVerifyState = peer.VerifyState
+				row.PeerVerifyFailedAtUnix = peer.VerifyFailedAtUnix
 			}
 
 			row.rank = rankRow(row)

@@ -80,7 +80,11 @@ func fullFixture() ([]store.Agent, map[string]store.Report, map[string][]store.S
 			Hostname: "hyper02p",
 			Domains: []store.ReportDomain{
 				{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 300},
+				// Carries a recorded verification failure as well as a
+				// critical status, so the branch that flags a copy known
+				// not to match is taken by the render test below.
 				{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "critical", AgeSeconds: -1,
+					VerifyState: "failed", VerifyFailedAtUnix: now.Unix() - 7200,
 					Reasons: []string{"no successful sync has ever completed against this target"}},
 			},
 		},
@@ -177,6 +181,85 @@ func TestDashboardSurfacesWhatMatters(t *testing.T) {
 	// A source nobody reports for is a blind spot, not a healthy pair.
 	if !strings.Contains(html, "no agent reporting this source") {
 		t.Error("an unreported source host is not flagged")
+	}
+}
+
+// A replica whose contents were compared against its source and found to
+// differ must say so on its own row, and must not be readable as healthy.
+//
+// Nothing else on this page asks that question. Status and the behind column
+// answer how far BEHIND a copy is, and the status word arrives from the agent:
+// one too old to assess the finding reports "ok", and a current one reports
+// "critical", which is also what a replica that is merely far behind reports.
+// Either way the row alone would not tell an operator that the copy is WRONG
+// -- which is exactly the row that gets promoted during an incident without a
+// second thought. This test fixes the domain's reported status at "ok" on
+// purpose, so it proves the console flags the finding on its own evidence
+// rather than by echoing the agent's verdict.
+func TestDashboardFlagsAReplicaKnownNotToMatchItsSource(t *testing.T) {
+	s := testServer(t)
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
+			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok"},
+		}},
+		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+			// Current by every measure this page had before: an ok status,
+			// two minutes behind, no failed attempts -- and wrong.
+			{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "ok", AgeSeconds: 120,
+				VerifyState: "failed", VerifyFailedAtUnix: now.Unix() - 7200},
+			{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 120},
+		}},
+	}
+
+	d := BuildDashboard(agents, reports, now)
+	var bad, clean Pair
+	for _, p := range d.Pairs {
+		switch p.TargetVM {
+		case "db01":
+			bad = p
+		case "web01":
+			clean = p
+		}
+	}
+	if !bad.VerifyFailed() {
+		t.Fatal("the pair does not carry the target's recorded verification failure, so nothing downstream can render it")
+	}
+	if bad.VerifyFailedAt() == "" {
+		t.Error("the date of the failure is not exposed; a bare marker cannot tell last night from last month")
+	}
+	if clean.VerifyFailed() {
+		t.Error("a replica with no recorded failure reports one -- an alarm on every row is one nobody reads")
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "dashboard.html", pageData{
+		User:      auth.User{Username: "op", Role: auth.RoleAdmin},
+		Active:    "dashboard",
+		Dashboard: d,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	if !strings.Contains(html, "verify failed") {
+		t.Error("the row carries no visible marker, so a copy known to be wrong reads as healthy")
+	}
+	if !strings.Contains(html, bad.VerifyFailedAt()) {
+		t.Errorf("the date %q is not on the page", bad.VerifyFailedAt())
+	}
+	if !strings.Contains(html, "differing from its source") {
+		t.Error("the marker is not explained; a word nobody can decode during an incident is not a warning")
+	}
+	// Both pairs go through the same template, so a marker rendered
+	// unconditionally would flag the healthy one too -- and a page that
+	// shouts about every row says nothing about any of them.
+	if n := strings.Count(html, "verify failed"); n != 1 {
+		t.Errorf("the marker appears %d times for one failing replica out of two", n)
 	}
 }
 

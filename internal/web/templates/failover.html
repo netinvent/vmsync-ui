@@ -54,6 +54,11 @@
             {{if .Role}}<span class="pill {{statusClass .Role}}">{{.Role}}</span>{{end}}
             {{if .WasFenced}}<span class="pill s-admin">fenced</span>{{end}}
             {{if .FenceFailed}}<span class="pill s-crit">fence failed</span>{{end}}
+            {{/* Beside the role, not folded into it. A replica that failed
+                 verification still carries an ordinary role and an ordinary
+                 staleness age; the only thing on the row saying its contents
+                 are wrong rather than merely old is this. */}}
+            {{if .VerifyFailed}}<span class="pill s-crit">verify failed</span>{{end}}
             {{if .Active}}<span class="pill s-ok">running</span>{{else}}<span class="pill s-none">stopped</span>{{end}}
             <div class="warnline">{{.Hostname}}</div>
             {{if .AgentStale}}<div class="warnline">agent stale — an action will not arrive until it checks in</div>{{end}}
@@ -65,6 +70,19 @@
               </div>
             {{else if .ContentsAsOf}}
               <div class="note">contents as of {{.ContentsAsOf}}</div>
+            {{end}}
+            {{if .VerifyFailed}}
+              <div class="warnline">
+                verification compared this copy against {{if .PeerRef}}{{.PeerRef}}{{else}}its source{{end}}{{if .VerifyFailedAt}} on {{.VerifyFailedAt}}{{end}}
+                and found the contents differing, and the finding has not been cleared. However
+                recent it is, this copy is known not to match. vmsync refuses every sync into it
+                while the finding stands — <em>Full resync</em> here included — so the repair is a
+                sync set to <em>recopy once, then re-verify</em> on its schedule, which clears the
+                finding only if that second comparison passes.
+                <em>Force clean resync</em> is the one control that does go through, and it does not
+                clear the finding — it discards it without re-verifying, leaving the copy unproven
+                rather than known good, and nothing afterwards says it ever failed.
+              </div>
             {{end}}
             {{if .ArmedFenceSource}}
               <div class="warnline">
@@ -96,6 +114,19 @@
               {{if .SplitBrain}}
                 <div class="warnline">SPLIT BRAIN — both copies are running and accepting writes</div>
               {{end}}
+              {{/* The finding belongs to the far end, but this is the row
+                   that can act on it: the resync controls are offered on the
+                   source, so without this the one row an operator uses to
+                   discard a verification failure never mentions there is
+                   one. */}}
+              {{if .PeerVerifyFailed}}
+                <span class="pill s-crit">verify failed</span>
+                <div class="warnline">
+                  this copy was compared against {{.VM}} and found differing{{if .PeerVerifyFailedAt}} on {{.PeerVerifyFailedAt}}{{end}},
+                  and the finding has not been cleared — it is known not to match, so it must not be failed over to
+                  until it has been rebuilt and re-proven
+                </div>
+              {{end}}
             {{else}}
               <span class="note">—</span>
             {{end}}
@@ -116,9 +147,36 @@
           {{if $user.IsAdmin}}
           <td>
             {{if .CanPromote}}
+            {{/* Outside the disclosure on purpose. Everything else on this
+                 cell collapses so a row stays one line at rest, but a
+                 warning that has to be opened to be read is one a hurried
+                 operator has already clicked past — and this is the only
+                 caution on the page that says the copy is WRONG rather than
+                 old. The pill on the summary repeats it for the same
+                 reason. */}}
+            {{if .VerifyFailed}}
+            <div class="warnline">
+              <strong>Known not to match its source.</strong>
+              Verification compared this copy against {{if .PeerRef}}{{.PeerRef}}{{else}}its source{{end}}{{if .VerifyFailedAt}} on {{.VerifyFailedAt}}{{end}}
+              and found the contents differing, and nobody has cleared the finding. Promoting it does
+              not serve stale data — it serves data already proven wrong, and the guest boots onto it
+              without knowing. If the source is still there, repair the replica first: a sync set to
+              <em>recopy once, then re-verify</em> rebuilds it and clears the finding only when the
+              second comparison passes.
+            </div>
+            {{end}}
             <details class="act">
-              <summary>{{if .PromoteFinishesAStalledFailover}}Finish the failover — start it…{{else}}Promote…{{end}}</summary>
+              <summary>{{if .PromoteFinishesAStalledFailover}}Finish the failover — start it…{{else}}Promote…{{end}}{{if .VerifyFailed}} <span class="pill s-crit">verify failed</span>{{end}}</summary>
               <form method="post" action="/failover/operation" class="inline">
+                {{if .VerifyFailed}}
+                <div class="note">
+                  Because this replica is <strong>known not to match its source</strong>, vmsync refuses
+                  the promotion on its own. Only <strong>force</strong> gets past that refusal, and
+                  ticking it changes what vmsync allows, not what the copy contains. Go ahead only when
+                  the source is gone and a copy proven wrong is better than no copy at all — and record
+                  why, because nothing downstream will remember that this was deliberate.
+                </div>
+                {{end}}
                 {{if .PromoteFinishesAStalledFailover}}
                 <div class="note">
                   This was promoted at {{.PromotedAt}} but never started, so nothing is serving it.
@@ -262,6 +320,17 @@
                   points — is gone. It will still refuse a replica that is <em>running</em>: shut it down
                   first.
                 </div>
+                {{if .PeerVerifyFailed}}
+                <div class="note">
+                  <strong>This also discards a recorded verification failure.</strong> The replica was compared
+                  against this source{{if .PeerVerifyFailedAt}} on {{.PeerVerifyFailedAt}}{{end}} and found
+                  differing. A force clean is the one path vmsync lets past that finding, and it does not clear
+                  it by re-proving the copy — it drops the record without re-verifying, so afterwards the replica
+                  is merely unproven and nothing says it ever failed. To repair it instead, use a sync set to
+                  <em>recopy once, then re-verify</em>, which clears the finding only when the second comparison
+                  passes.
+                </div>
+                {{end}}
                 <button class="danger">Force clean and resync {{.VM}}</button>
               </form>
             </details>

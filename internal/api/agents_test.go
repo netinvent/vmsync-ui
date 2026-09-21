@@ -337,6 +337,78 @@ func TestAReportCarryingFenceStateIsAccepted(t *testing.T) {
 	}
 }
 
+// The same contract for the verification verdict, which is the field a
+// promotion decision turns on: -verify compared a replica against its source,
+// found them different, and vmsync recorded that on the replica's own domain
+// metadata so the finding outlives the run.
+//
+// Its own test rather than two more lines in the one above, because the
+// failure it guards against is specific and silent. These fields arrive from
+// agents newer than this UI; if their names do not exist here, every report
+// from every upgraded host is rejected whole, and the console shows an estate
+// that has apparently stopped reporting rather than a protocol mismatch.
+func TestAReportCarryingAVerificationFailureIsAccepted(t *testing.T) {
+	srv, ts := newTestServer(t)
+	id, token := enrolAgent(t, srv, ts, "hyper02p")
+
+	const body = `{
+	  "reported_at_unix": 1800000000,
+	  "agent_version": "0.41",
+	  "hostname": "hyper02p",
+	  "libvirt_uri": "qemu:///system",
+	  "domains": [
+	    {
+	      "name": "db01",
+	      "active": false,
+	      "role": "target",
+	      "failure_count": 0,
+	      "replica_source": "hyper01p:db01",
+	      "verify_state": "failed",
+	      "verify_failed_at_unix": 1799990000,
+	      "status": "ok",
+	      "age_seconds": 120
+	    },
+	    {
+	      "name": "web01",
+	      "active": false,
+	      "role": "target",
+	      "failure_count": 0,
+	      "replica_source": "hyper01p:web01",
+	      "status": "ok",
+	      "age_seconds": 60
+	    }
+	  ]
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/agents/"+id+"/report", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("report = %s, want 204 -- the verification fields the agent sends are missing here, "+
+			"which rejects the whole report and not just them", resp.Status)
+	}
+
+	got, ok, err := srv.Store.Report(id)
+	if err != nil || !ok {
+		t.Fatalf("Report() = ok:%v err:%v", ok, err)
+	}
+	if len(got.Domains) != 2 {
+		t.Fatalf("stored %d domains, want 2", len(got.Domains))
+	}
+	if got.Domains[0].VerifyState != "failed" || got.Domains[0].VerifyFailedAtUnix != 1799990000 {
+		t.Errorf("the verification verdict did not survive the round trip: %+v", got.Domains[0])
+	}
+	// And the replica nobody found fault with must carry no finding, or the
+	// console flags an entire estate.
+	if got.Domains[1].VerifyState != "" || got.Domains[1].VerifyFailedAtUnix != 0 {
+		t.Errorf("a replica with no recorded failure came back carrying one: %+v", got.Domains[1])
+	}
+}
+
 func TestConfigReturnsAnETagAndThen304(t *testing.T) {
 	srv, ts := newTestServer(t)
 	id, token := enrolAgent(t, srv, ts, "hyper01p")
