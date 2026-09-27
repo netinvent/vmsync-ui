@@ -648,6 +648,400 @@ func TestTheSourceRowShowsTheReplicasVerificationFailure(t *testing.T) {
 	}
 }
 
+// partialCopyFixture is one pair whose replica was left half-written by an
+// interrupted rebuild, beside an identical pair that is fine.
+//
+// Both replicas are stopped, roleless and therefore promotable, which is the
+// whole point: the affected one offers a Promote control on disks that hold
+// part of a copy, and nothing else on its row says so. The clean pair is
+// what proves the marker is conditional -- a warning on every row is the
+// same as a warning on none.
+func partialCopyFixture(raw string) ([]store.Agent, map[string]store.Report) {
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix() - 30},
+		{ID: "dr", Hostname: "hyper02p", LastSeenAt: now.Unix() - 30},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+			{Name: "db01", Active: true, Role: store.RoleSource, ReplicaTargets: []string{"hyper02p:db01"}},
+			{Name: "web01", Active: true, Role: store.RoleSource, ReplicaTargets: []string{"hyper02p:web01"}},
+		}},
+		"dr": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+			// Reads healthy by everything else on the row: a recent
+			// checkpoint and a recent sync, both written by the run BEFORE
+			// the one that died.
+			{Name: "db01", Active: false, ReplicaSource: "hyper01p:db01",
+				LastCheckpoint: "vmsync-1758441000", LastSyncUnix: now.Unix() - 3600,
+				ReplicaIncomplete: raw},
+			{Name: "web01", Active: false, ReplicaSource: "hyper01p:web01",
+				LastCheckpoint: "vmsync-1758441000", LastSyncUnix: now.Unix() - 3600},
+		}},
+	}
+	return agents, reports
+}
+
+// The failover page is where this matters most, because it is the page with
+// the Promote button on it.
+//
+// The marker has to reach three places, and each covers a different way an
+// operator arrives at the decision: the replica's own row, the SOURCE's row
+// (which is where the resync that repairs it is offered, and where the
+// source's own metadata knows nothing about any of this), and the promote
+// control itself.
+func TestTheFailoverPageFlagsAReplicaLeftHalfWrittenByAnInterruptedRebuild(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=reinit,at=1758441600,action=9f3c1a2b4d5e6f70,host=hyper02p,aside=1758441600"
+	agents, reports := partialCopyFixture(raw)
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	replica := rowFor(t, v, "hyper02p", "db01")
+	source := rowFor(t, v, "hyper01p", "db01")
+	cleanReplica := rowFor(t, v, "hyper02p", "web01")
+	cleanSource := rowFor(t, v, "hyper01p", "web01")
+
+	if !replica.ReplicaPartial() {
+		t.Fatal("the replica's row does not carry its own interrupted-rebuild marker")
+	}
+	if replica.ReplicaPartialUnreadable() {
+		t.Error("a value in the engine's own grammar read as unreadable")
+	}
+	if replica.ReplicaPartialVerb() != "reinit" || replica.ReplicaPartialHost() != "hyper02p" {
+		t.Errorf("the value did not break out for display: verb=%q host=%q",
+			replica.ReplicaPartialVerb(), replica.ReplicaPartialHost())
+	}
+	if replica.ReplicaPartialAt() == "" {
+		t.Error("the date is not exposed on the replica's row")
+	}
+	if replica.ReplicaPartialAside() != ".vmsync-replaced-1758441600" {
+		t.Errorf("ReplicaPartialAside() = %q, want the suffix the complete copy is still under",
+			replica.ReplicaPartialAside())
+	}
+	if !replica.CanPromote() {
+		t.Fatal("this fixture is meant to offer Promote on the affected replica; without it the warning has nothing to attach to")
+	}
+	if !source.PeerReplicaPartial() {
+		t.Fatal("the source's row does not carry its replica's marker, so the row offering the resync says nothing about it")
+	}
+	if source.PeerReplicaPartialAt() == "" || source.PeerReplicaPartialAside() == "" {
+		t.Errorf("the peer's detail is not exposed on the source row: at=%q aside=%q",
+			source.PeerReplicaPartialAt(), source.PeerReplicaPartialAside())
+	}
+	if !source.CanReinit() {
+		t.Fatal("this fixture is meant to offer Full resync on the source row, which is the repair")
+	}
+	if cleanReplica.ReplicaPartial() || cleanSource.PeerReplicaPartial() {
+		t.Error("an unaffected pair reports a partial copy on one of its rows")
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	for _, want := range []string{
+		// On the replica's row: the pill beside the role, and the dated
+		// explanation with the three facts nothing else on the page carries.
+		"partial copy",
+		replica.ReplicaPartialAt(),
+		"renamed the previous disks aside",
+		"describes the copy it replaced",
+		".vmsync-replaced-1758441600",
+		// On the source's row, where the resync lives.
+		"nothing else about it looks wrong",
+		"below is the repair",
+		// And inside the Full resync control, which is the only repair.
+		"the repair for the partial copy above",
+		// And in the promote control: the refusal, and the one thing that
+		// gets past it.
+		"vmsync will refuse this promotion",
+		"gets past that refusal",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the rendered failover page is missing %q", want)
+		}
+	}
+	// Three pills: the replica's row, the source's row, and the promote
+	// control's summary. Two pairs are rendered and only one is affected, so
+	// a count above three would mean the clean pair is being flagged too.
+	if n := strings.Count(html, `<span class="pill s-crit">partial copy</span>`); n != 3 {
+		t.Errorf("the partial-copy pill appears %d times, want 3 (the replica's row, the source's row "+
+			"and the promote control) -- more would mean the clean pair is flagged, fewer that one of "+
+			"the three routes to the decision says nothing", n)
+	}
+	// The role and runtime pills survive beside it, as with every other
+	// marker on this page. Replacing a true fact with another true fact is
+	// not an improvement.
+	if !strings.Contains(html, `<span class="pill s-none">stopped</span>`) {
+		t.Error("the marker displaced the runtime state rather than sitting beside it")
+	}
+}
+
+// The same page, and the same requirement as on the board: a value this
+// build cannot read must still warn, and must show the operator the exact
+// text the agent reported.
+//
+// This is the case where the page has the least to say and the most at
+// stake. It cannot name the verb, so it cannot say how much of the replica
+// the dead run discarded -- but the one fact that decides the promotion is
+// carried by the marker EXISTING, and that fact is unaffected.
+func TestTheFailoverPageStillWarnsWhenThePartialCopyValueCannotBeRead(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=rebase-overlay,at=1758441600,host=hyper02p"
+	agents, reports := partialCopyFixture(raw)
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	replica := rowFor(t, v, "hyper02p", "db01")
+	source := rowFor(t, v, "hyper01p", "db01")
+	if !replica.ReplicaPartial() || !replica.ReplicaPartialUnreadable() {
+		t.Fatalf("an unreadable value did not land as an unreadable marker: partial=%v unreadable=%v",
+			replica.ReplicaPartial(), replica.ReplicaPartialUnreadable())
+	}
+	if !source.PeerReplicaPartial() || !source.PeerReplicaPartialUnreadable() {
+		t.Fatal("the source's row lost the peer's unreadable marker")
+	}
+	// No aside stamp in this value, so the page must not name files that
+	// were never written -- it falls back to telling the operator what to
+	// look for instead.
+	if replica.ReplicaPartialAside() != "" {
+		t.Errorf("ReplicaPartialAside() = %q for a value that carried none", replica.ReplicaPartialAside())
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	for _, want := range []string{
+		"partial copy",
+		"could not read the detail",
+		// Verbatim, on both rows.
+		raw,
+		// The promotion is still refused, and the promote control still says
+		// so -- none of that depended on parsing the value.
+		"vmsync will refuse this promotion",
+		// And with no stamp to name, the page says what to go looking for.
+		".vmsync-replaced-&lt;time&gt;",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the rendered failover page is missing %q for an unreadable marker", want)
+		}
+	}
+}
+
+// The id has to reach both rows of the affected pair, and for different
+// reasons.
+//
+// On the replica's row it is the handle off a decision the operator has just
+// been refused: the Promote control is right there, vmsync will not honour
+// it, and the next question is always what ran and under whose hand. On the
+// SOURCE's row it is what an operator should read before firing the resync
+// again, because a rebuild that died to something nobody looked at dies the
+// same way twice -- and the source's own metadata records none of this. The
+// same string sits on this console's audit entry and in the engine's journal
+// beside the disks, which is the three-way loop the README describes and
+// which nothing on this page could walk while the id was parsed and then
+// dropped.
+func TestTheFailoverPagePrintsTheActionIdOfAnInterruptedRebuild(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=reinit,at=1758441600,action=9f3c1a2b4d5e6f70,host=hyper02p,aside=1758441600"
+	agents, reports := partialCopyFixture(raw)
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	replica := rowFor(t, v, "hyper02p", "db01")
+	source := rowFor(t, v, "hyper01p", "db01")
+	cleanReplica := rowFor(t, v, "hyper02p", "web01")
+	cleanSource := rowFor(t, v, "hyper01p", "web01")
+
+	if replica.ReplicaPartialAction() != "9f3c1a2b4d5e6f70" {
+		t.Fatalf("ReplicaPartialAction() = %q, want the id the engine stamped the dead run with",
+			replica.ReplicaPartialAction())
+	}
+	if source.PeerReplicaPartialAction() != "9f3c1a2b4d5e6f70" {
+		t.Fatalf("PeerReplicaPartialAction() = %q, want the same id on the row the resync is fired from",
+			source.PeerReplicaPartialAction())
+	}
+	if cleanReplica.ReplicaPartialAction() != "" || cleanSource.PeerReplicaPartialAction() != "" {
+		t.Errorf("an unaffected pair reports an action id: own=%q peer=%q",
+			cleanReplica.ReplicaPartialAction(), cleanSource.PeerReplicaPartialAction())
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	// Marked up as something to be copied into a grep, not reflowed into the
+	// sentence around it.
+	if !strings.Contains(html, "<code>9f3c1a2b4d5e6f70</code>") {
+		t.Error("the failover page never prints the correlation id, so the one page with the Promote " +
+			"button on it cannot say where to read what happened to this replica")
+	}
+	if !strings.Contains(html, "audit log") {
+		t.Error("the id is printed with nothing saying what to search with it")
+	}
+	// Twice: the replica's own row and the source's row. Fewer means one of
+	// the two ways into this decision says nothing; more means the clean pair
+	// is being told about a rebuild that never touched it.
+	if n := strings.Count(html, "9f3c1a2b4d5e6f70"); n != 2 {
+		t.Errorf("the correlation id appears %d times, want 2 (the replica's row and the source's row "+
+			"that offers the resync)", n)
+	}
+	// Counting alone would be satisfied by printing it twice in ONE place, so
+	// each site is pinned by wording only it uses. Without this, deleting the
+	// peer block and duplicating the replica's leaves the count at two and
+	// the source's row -- the row the next rebuild is fired from -- silent.
+	if !strings.Contains(html, "'s vmsync journal with, which is what") {
+		t.Error("the replica's own row no longer prints the correlation id")
+	}
+	if !strings.Contains(html, "the replica host's vmsync journal with") {
+		t.Error("the source's row no longer prints the correlation id, so the row that offers the " +
+			"resync says nothing about the run that already failed")
+	}
+}
+
+// The id is the only part of an agent-supplied marker that reaches the page
+// on the READABLE path, so it is the only part that could carry markup into a
+// sentence rather than into the quoted-raw-value box.
+//
+// html/template escapes it, and this test exists to keep that true rather
+// than to report a defect: the value arrives from an agent, an agent reads it
+// from a domain's metadata, and domain metadata is editable by anyone with
+// virsh on that host. The existing escape test covers the UNREADABLE branch,
+// where the raw text is echoed deliberately; this covers the branch where it
+// is not.
+func TestAReadablePartialCopyValueIsEscapedOnTheWayOut(t *testing.T) {
+	s := testServer(t)
+	const raw = `verb=reinit,at=1758441600,action=<img src=x onerror=alert(1)>,host=hyper02p`
+	agents, reports := partialCopyFixture(raw)
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	replica := rowFor(t, v, "hyper02p", "db01")
+	if replica.ReplicaPartialUnreadable() {
+		t.Fatal("this fixture is meant to take the READABLE path; the unreadable branch is covered elsewhere")
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	if strings.Contains(html, "<img src=x") {
+		t.Error("the action id reached the page unescaped: a value written into a domain's metadata on " +
+			"any hypervisor would then run as markup in an admin's browser")
+	}
+	if !strings.Contains(html, "&lt;img") {
+		t.Error("the action id was neither escaped nor rendered; it should appear, escaped, so an " +
+			"operator can still see what the marker actually said")
+	}
+}
+
+// Same absence as on the board, and the same trap: an engine older than the
+// field writes no action=, and an unconditional <code>{{...}}</code> would
+// leave an empty box in the warning.
+//
+// It has to be checked on this page separately because the value is broken
+// out twice here -- once from the row's own marker and once from the peer's
+// -- so a guard can be forgotten on one and kept on the other.
+func TestTheFailoverPagePrintsNoActionIdWhenTheMarkerCarriesNone(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=reinit,at=1758441600,host=hyper02p,aside=1758441600"
+	agents, reports := partialCopyFixture(raw)
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	replica := rowFor(t, v, "hyper02p", "db01")
+	source := rowFor(t, v, "hyper01p", "db01")
+	if !replica.ReplicaPartial() || replica.ReplicaPartialUnreadable() {
+		t.Fatalf("the fixture no longer models a readable marker: partial=%v unreadable=%v",
+			replica.ReplicaPartial(), replica.ReplicaPartialUnreadable())
+	}
+	if replica.ReplicaPartialAction() != "" || source.PeerReplicaPartialAction() != "" {
+		t.Fatalf("an action id came out of a value carrying none: own=%q peer=%q",
+			replica.ReplicaPartialAction(), source.PeerReplicaPartialAction())
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	if strings.Contains(html, "<code></code>") {
+		t.Error("an empty code element reached the page, which reads as a correlation id that went " +
+			"missing rather than one that was never written")
+	}
+	// The warning itself is unaffected: the replica is still unpromotable,
+	// and that never depended on the id.
+	if !strings.Contains(html, "PARTIAL COPY") {
+		t.Error("a marker carrying no action id lost the explanation on the replica's row")
+	}
+	if !strings.Contains(html, "nothing else about it looks wrong") {
+		t.Error("a marker carrying no action id lost the explanation on the source's row")
+	}
+}
+
+// The unreadable path is the one that echoes agent-supplied text straight
+// onto an admin page, so it is the one that has to escape it.
+//
+// The engine's own grammar contains no markup characters, which is exactly
+// why this needs a test: every value written by a working vmsync would pass
+// without escaping, and the first value that would not is by definition one
+// nothing on this side has seen before.
+func TestAnUnreadablePartialCopyValueIsEscapedOnTheWayOut(t *testing.T) {
+	s := testServer(t)
+	const raw = `verb=<script>alert("x")</script>&at=1`
+	agents, reports := partialCopyFixture(raw)
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	if !rowFor(t, v, "hyper02p", "db01").ReplicaPartialUnreadable() {
+		t.Fatal("the fixture no longer takes the unreadable path, so this proves nothing")
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	if strings.Contains(html, "<script>alert") {
+		t.Fatal("an agent-supplied value reached the page as live markup")
+	}
+	if !strings.Contains(html, "&lt;script&gt;") {
+		t.Error("the value was neither escaped nor shown; an operator needs to see the text that could not be read")
+	}
+	// And it still warns, which is the whole point of showing it at all.
+	if !strings.Contains(html, "partial copy") {
+		t.Error("a value that had to be escaped lost its marker")
+	}
+}
+
 // A reader sees the state and none of the buttons.
 func TestFailoverPageOffersAReaderNothingToClick(t *testing.T) {
 	s := testServer(t)
@@ -998,6 +1392,62 @@ func TestPromoteReachesTheAgentConfig(t *testing.T) {
 	}
 	if len(other.Operations) != 0 {
 		t.Errorf("the source agent was published %d operations, want 0", len(other.Operations))
+	}
+}
+
+// An operation issued from this page must reach the agent carrying the same
+// id as the audit entry that recorded the decision.
+//
+// This is the whole trail, end to end and across three programs that share
+// no storage: the audit entry here says who asked and why, the agent passes
+// this id to the engine as -action-id, and the engine stamps it into the
+// intent and outcome records it journals beside the disks on the hypervisor.
+// The case it is for is the one nobody plans: somebody is holding a replica
+// whose rebuild died, and the only way to find out what ran, under whose
+// hand, and whether it was the first attempt or the third, is to follow one
+// string through all three records.
+//
+// An id recorded here but not published would join nothing to nothing, which
+// is why this asserts on the AGENT's copy rather than on the store's.
+func TestAnIssuedOperationReachesTheAgentCarryingItsAuditID(t *testing.T) {
+	s := testServer(t)
+	if rec := post(t, s, "/failover/operation", url.Values{
+		"kind": {"reinit"}, "agent_id": {"src"}, "vm": {"db01"},
+	}); rec.Code != 303 {
+		t.Fatalf("issue: %d -- %s", rec.Code, rec.Body.String())
+	}
+
+	cfg, _, err := s.Store.AgentConfigFor("src")
+	if err != nil {
+		t.Fatalf("agent config: %v", err)
+	}
+	if len(cfg.Operations) != 1 {
+		t.Fatalf("the agent is published %d operations, want 1", len(cfg.Operations))
+	}
+	actionID := cfg.Operations[0].ActionID
+	if actionID == "" {
+		t.Fatal("the published operation carries no correlation id, so the engine's journal on the " +
+			"hypervisor can never be tied back to who asked for the run")
+	}
+
+	entries, err := s.Store.Audit()
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	var matched *store.AuditEntry
+	for i := range entries {
+		if entries[i].ID == actionID {
+			matched = &entries[i]
+			break
+		}
+	}
+	if matched == nil {
+		t.Fatalf("the correlation id %q matches no audit entry -- a journal record pointing at an "+
+			"intent that was never written is a false trail, which is worse than none", actionID)
+	}
+	if matched.Action != store.OpReinit || matched.Target != "db01" || matched.Actor != "op" {
+		t.Errorf("the correlation id leads to the wrong entry: action=%q target=%q actor=%q",
+			matched.Action, matched.Target, matched.Actor)
 	}
 }
 

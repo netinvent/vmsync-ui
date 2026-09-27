@@ -168,9 +168,27 @@
                  over to it. This pill is what says which kind of critical
                  this row is. */}}
             {{if .VerifyFailed}}<span class="pill s-crit">verify failed</span>{{end}}
+            {{/* A third pill, beside the status and never instead of it, and
+                 the one that contradicts every other cell on this row. An
+                 interrupted rebuild moves NOTHING: the checkpoint, the
+                 "behind" figure and the failure count were all written by the
+                 sync before it and describe the copy it renamed aside, so
+                 this row reads healthy and is telling the truth about disks
+                 that are no longer there. Without this pill nothing on the
+                 board distinguishes it from a pair that is genuinely fine. */}}
+            {{if .ReplicaPartial}}<span class="pill s-crit">partial copy</span>{{end}}
           </td>
           <td class="mono">{{.SourceHost}}:{{.SourceVM}}
             {{if not .SourceSeen}}<div class="warnline">no agent reporting this source</div>{{end}}
+            {{/* Repeated on the source cell because that is the end a repair
+                 is driven from: a resync runs on the source, and the source's
+                 own metadata has no idea the copy it wrote died half way. */}}
+            {{if .ReplicaPartial}}
+              <div class="warnline">
+                the replica this writes to is a <strong>partial copy</strong> — rebuild it from here
+                before anyone fails over to it
+              </div>
+            {{end}}
           </td>
           <td class="mono">{{.TargetHost}}:{{.TargetVM}}
             {{if .TargetActive}}<div class="warnline">target is running</div>{{end}}
@@ -183,6 +201,42 @@
                 recopy once and re-verify, which clears it only if that second comparison passes.
                 A force-clean resync is the one thing that still goes through, and it discards the
                 finding without re-verifying rather than clearing it.
+              </div>
+            {{end}}
+            {{if .ReplicaPartial}}
+              <div class="warnline">
+                <strong>PARTIAL COPY — an interrupted rebuild.</strong>
+                {{if .ReplicaPartialVerb}}A {{.ReplicaPartialVerb}}{{else}}A full copy{{end}} into this replica
+                started{{if .ReplicaPartialAt}} on {{.ReplicaPartialAt}}{{end}}{{if .ReplicaPartialHost}}, run from {{.ReplicaPartialHost}}{{end}},
+                and never recorded finishing. The disks here are what that run had written when it
+                stopped. <strong>Every other figure on this row describes a different copy</strong> —
+                the checkpoint, the lag and the failure count were written by the sync BEFORE it, and
+                belong to the disks that rebuild renamed aside.
+                {{if .ReplicaPartialAside}}
+                  That complete copy may still be on {{.TargetHost}}, in the files ending
+                  <code>{{.ReplicaPartialAside}}</code>; nothing removes them for you.
+                {{else}}
+                  Check {{.TargetHost}} for files ending <code>.vmsync-replaced-&lt;time&gt;</code> before
+                  anything is tidied up: a complete copy is often still sitting in them.
+                {{end}}
+                {{/* The one part of the marker that leads anywhere. Everything
+                     else here describes the wreck; this is the string that
+                     joins it to the audit entry saying who started the run and
+                     to the engine's own journal saying what it managed to do,
+                     which is how the question this row raises actually gets
+                     answered. Guarded because a marker predating the field
+                     carries none, and an empty box helps nobody. */}}
+                {{if .ReplicaPartialAction}}
+                  That run was recorded as <code>{{.ReplicaPartialAction}}</code> — search this
+                  console's audit log and {{.TargetHost}}'s vmsync journal for that id to see who
+                  started it and how far it got.
+                {{end}}
+                vmsync refuses to promote it. The repair is a full resync from the source.
+                {{if .ReplicaPartialUnreadable}}
+                  <br>This console could not read the detail this agent reported
+                  (<code>{{.ReplicaIncomplete}}</code>), which changes nothing about the warning —
+                  the marker is set, so the rebuild did not finish.
+                {{end}}
               </div>
             {{end}}
           </td>

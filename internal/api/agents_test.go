@@ -409,6 +409,91 @@ func TestAReportCarryingAVerificationFailureIsAccepted(t *testing.T) {
 	}
 }
 
+// The same contract again for the interrupted-rebuild marker, and this one
+// is the most consequential of the three.
+//
+// It is armed by the engine before it starts overwriting a replica's disks
+// and cleared by the same metadata write that records the rebuild
+// succeeding, so a domain still carrying it holds a half-written copy while
+// every other field beside it -- checkpoint, last sync, failure count --
+// still describes the complete copy that rebuild renamed aside. Those other
+// fields are exactly what this console judges a replica by, which means a
+// missing name here does not degrade the picture: it leaves an estate in
+// which a partial copy is indistinguishable from a healthy one.
+//
+// And the usual asymmetry applies with extra force. Because the value is
+// omitempty and the condition is rare, a report from an agent ahead of its
+// UI decodes cleanly for every healthy domain and is rejected outright the
+// first time a rebuild is interrupted -- so the symptom would arrive weeks
+// after the upgrade that caused it, on precisely the host with something
+// wrong.
+func TestAReportCarryingAnInterruptedRebuildIsAccepted(t *testing.T) {
+	srv, ts := newTestServer(t)
+	id, token := enrolAgent(t, srv, ts, "hyper02p")
+
+	const raw = "verb=reinit,at=1758441600,action=9f3c1a2b4d5e6f70,host=hyper02p,aside=1758441600"
+	const body = `{
+	  "reported_at_unix": 1800000000,
+	  "agent_version": "0.42",
+	  "hostname": "hyper02p",
+	  "libvirt_uri": "qemu:///system",
+	  "domains": [
+	    {
+	      "name": "db01",
+	      "active": false,
+	      "role": "target",
+	      "failure_count": 0,
+	      "replica_source": "hyper01p:db01",
+	      "last_checkpoint": "vmsync-1758441000",
+	      "last_sync_unix": 1758441000,
+	      "replica_incomplete": "` + raw + `",
+	      "status": "ok",
+	      "age_seconds": 120
+	    },
+	    {
+	      "name": "web01",
+	      "active": false,
+	      "role": "target",
+	      "failure_count": 0,
+	      "replica_source": "hyper01p:web01",
+	      "status": "ok",
+	      "age_seconds": 60
+	    }
+	  ]
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/agents/"+id+"/report", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("report = %s, want 204 -- the interrupted-rebuild field the agent sends is missing "+
+			"here, which rejects the whole report and not just it", resp.Status)
+	}
+
+	got, ok, err := srv.Store.Report(id)
+	if err != nil || !ok {
+		t.Fatalf("Report() = ok:%v err:%v", ok, err)
+	}
+	if len(got.Domains) != 2 {
+		t.Fatalf("stored %d domains, want 2", len(got.Domains))
+	}
+	// Verbatim: this side carries the engine's line intact and parses it
+	// only where it is rendered, so a newer engine putting something new in
+	// it degrades the explanation rather than the warning.
+	if got.Domains[0].ReplicaIncomplete != raw {
+		t.Errorf("the interrupted-rebuild marker did not survive the round trip: %q", got.Domains[0].ReplicaIncomplete)
+	}
+	// And the replica whose rebuilds all finished must carry none, or the
+	// console puts a partial-copy warning on an entire estate.
+	if got.Domains[1].ReplicaIncomplete != "" {
+		t.Errorf("a replica with no interrupted rebuild came back carrying one: %q", got.Domains[1].ReplicaIncomplete)
+	}
+}
+
 func TestConfigReturnsAnETagAndThen304(t *testing.T) {
 	srv, ts := newTestServer(t)
 	id, token := enrolAgent(t, srv, ts, "hyper01p")

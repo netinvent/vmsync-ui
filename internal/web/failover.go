@@ -75,6 +75,14 @@ type FailoverRow struct {
 	// away without re-verifying.
 	PeerVerifyState        string
 	PeerVerifyFailedAtUnix int64
+	// PeerReplicaIncomplete is the peer's raw interrupted-rebuild marker,
+	// carried here for the same reason PeerVerifyState is and with more at
+	// stake. The controls that CAUSE this condition -- Full resync and Force
+	// clean resync -- are both offered on the source's row, because a resync
+	// is a sync and runs from the source; so the row an operator uses to
+	// start another rebuild of a half-written replica is, without this, the
+	// one row on the page that never mentions the last one died.
+	PeerReplicaIncomplete string
 
 	// IsReplica and IsSource are what this domain is in the pair, which is
 	// not the same question as its replication_role: a domain can carry no
@@ -109,6 +117,19 @@ type FailoverRow struct {
 	// right by being recent.
 	VerifyState        string
 	VerifyFailedAtUnix int64
+
+	// ReplicaIncomplete is this domain's raw interrupted-rebuild marker: a
+	// full copy into it started, renamed its good disks aside, began writing
+	// new ones, and never recorded finishing.
+	//
+	// The one fact on this row that contradicts every other fact on it. A
+	// verification failure at least raises the status; this leaves the
+	// domain reporting a recent checkpoint, a recent sync and no failures,
+	// because those were written by the run BEFORE the interrupted one and
+	// describe the copy it renamed aside. ContentsAsOf, which a promoting
+	// operator reads as the data-loss window, is measured from that same
+	// stale record -- so on this row it does not describe the disks at all.
+	ReplicaIncomplete string
 
 	// ArmedFence is the fence THIS domain's promotion armed, so a promoted
 	// row can say whether it authorised stopping its old source. A promoted
@@ -442,6 +463,106 @@ func (r FailoverRow) PeerVerifyFailedAt() string {
 	return time.Unix(r.PeerVerifyFailedAtUnix, 0).UTC().Format("2006-01-02 15:04 UTC")
 }
 
+// ReplicaPartial reports that a rebuild of this domain's disks armed the
+// interrupted-copy marker and never cleared it.
+//
+// Presence is the state, as with VerifyFailed and for a stronger version of
+// the same reason: the engine clears this in the SAME metadata write that
+// records the rebuild succeeding, so a value surviving here is a run that
+// never reached that write. Anything unrecognised still flags the row --
+// this is a signal whose ABSENCE reads as "safe to promote", so it may only
+// ever fail towards the warning.
+func (r FailoverRow) ReplicaPartial() bool { return r.ReplicaIncomplete != "" }
+
+// ReplicaPartialUnreadable says the marker is there and this build could not
+// read the value. The row still warns, and shows the raw text: what has to
+// be acted on is that a rebuild died here, and none of the detail changes
+// that.
+func (r FailoverRow) ReplicaPartialUnreadable() bool {
+	return r.ReplicaIncomplete != "" && !parsePartialCopy(r.ReplicaIncomplete).Readable
+}
+
+// ReplicaPartialVerb names which action armed the marker, which says how
+// much of the replica the dead run had already discarded.
+func (r FailoverRow) ReplicaPartialVerb() string { return parsePartialCopy(r.ReplicaIncomplete).Verb }
+
+// ReplicaPartialAt is when the interrupted rebuild started, "" when the
+// value carried no readable time.
+func (r FailoverRow) ReplicaPartialAt() string { return parsePartialCopy(r.ReplicaIncomplete).At() }
+
+// ReplicaPartialAction is the correlation id the dead run was issued under.
+//
+// It matters more on this page than anywhere else, because this is the page
+// with the Promote button: somebody standing in front of a replica they are
+// not allowed to promote needs to find out what happened to it, and this id
+// is the only handle that reaches off the row. The same string is on this
+// console's audit entry for the run and in the engine's journal beside the
+// disks, so it joins who asked, what was published and what the engine then
+// did -- three programs that share no storage and would otherwise be lined
+// up by clock. Empty for a marker from an engine that predates the field,
+// which costs the trail and nothing else.
+func (r FailoverRow) ReplicaPartialAction() string {
+	return parsePartialCopy(r.ReplicaIncomplete).ActionID
+}
+
+// ReplicaPartialHost is the machine that ran the dead copy -- the source for
+// a rebuild, this host itself for a restore -- not the host it was writing
+// to, which is this row.
+func (r FailoverRow) ReplicaPartialHost() string { return parsePartialCopy(r.ReplicaIncomplete).Host }
+
+// ReplicaPartialAside is the filename suffix the displaced disks were
+// renamed with. It is the most actionable part of the whole marker: the
+// complete copy is usually still sitting in those files, untouched, on the
+// host the operator is already logged into.
+func (r FailoverRow) ReplicaPartialAside() string {
+	return parsePartialCopy(r.ReplicaIncomplete).AsideSuffix()
+}
+
+// PeerReplicaPartial reports the same condition on the OTHER end of the
+// pair. On a source's row that is the replica it writes to, which is the row
+// the resync controls live on.
+func (r FailoverRow) PeerReplicaPartial() bool { return r.PeerReplicaIncomplete != "" }
+
+// PeerReplicaPartialUnreadable is PeerReplicaPartial's unreadable case.
+func (r FailoverRow) PeerReplicaPartialUnreadable() bool {
+	return r.PeerReplicaIncomplete != "" && !parsePartialCopy(r.PeerReplicaIncomplete).Readable
+}
+
+// PeerReplicaPartialVerb, PeerReplicaPartialAt, PeerReplicaPartialAction,
+// PeerReplicaPartialHost and PeerReplicaPartialAside break the peer's value
+// out for the source row's explanation. Same format as their own-row
+// counterparts, because the two are read side by side on one page.
+func (r FailoverRow) PeerReplicaPartialVerb() string {
+	return parsePartialCopy(r.PeerReplicaIncomplete).Verb
+}
+
+// PeerReplicaPartialAt is when the peer's interrupted rebuild started.
+func (r FailoverRow) PeerReplicaPartialAt() string {
+	return parsePartialCopy(r.PeerReplicaIncomplete).At()
+}
+
+// PeerReplicaPartialAction is the dead run's correlation id, repeated on the
+// source's row because that row is where the rebuild is driven from. An
+// operator deciding whether to fire the resync wants to know what the last
+// attempt did, and the audit entry that answers that is reachable only by
+// this id -- the source's own metadata records none of it.
+func (r FailoverRow) PeerReplicaPartialAction() string {
+	return parsePartialCopy(r.PeerReplicaIncomplete).ActionID
+}
+
+// PeerReplicaPartialHost is the machine that ran the rebuild that died. On
+// this row -- the source's -- that is very often this host itself, which is
+// worth showing rather than hiding: it says the interrupted run started here.
+func (r FailoverRow) PeerReplicaPartialHost() string {
+	return parsePartialCopy(r.PeerReplicaIncomplete).Host
+}
+
+// PeerReplicaPartialAside is the suffix the peer's displaced disks were
+// renamed with.
+func (r FailoverRow) PeerReplicaPartialAside() string {
+	return parsePartialCopy(r.PeerReplicaIncomplete).AsideSuffix()
+}
+
 // WasRestored reports whether this domain's disks were rolled back to a
 // restore point rather than being what the last sync copied.
 func (r FailoverRow) WasRestored() bool { return r.RestoredFrom != "" }
@@ -713,6 +834,13 @@ func BuildFailoverView(
 				VerifyState:        dom.VerifyState,
 				VerifyFailedAtUnix: dom.VerifyFailedAtUnix,
 
+				// Raw, and carried rather than interpreted. It is written
+				// and cleared by the engine on the host holding the disks,
+				// which is also the only host that can still read it when
+				// the source site is gone -- so this console's job is to
+				// repeat it, not to have a view about it.
+				ReplicaIncomplete: dom.ReplicaIncomplete,
+
 				ArmedFenceSource:  dom.FenceSource,
 				ArmedFenceAtUnix:  dom.FenceArmedAtUnix,
 				ArmedFenceArmedBy: dom.FenceArmedBy,
@@ -741,6 +869,7 @@ func BuildFailoverView(
 				row.PeerActive = peer.Active
 				row.PeerVerifyState = peer.VerifyState
 				row.PeerVerifyFailedAtUnix = peer.VerifyFailedAtUnix
+				row.PeerReplicaIncomplete = peer.ReplicaIncomplete
 			}
 
 			row.rank = rankRow(row)

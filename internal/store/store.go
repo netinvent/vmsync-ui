@@ -359,6 +359,39 @@ type ReportDomain struct {
 	VerifyState        string `json:"verify_state,omitempty"`
 	VerifyFailedAtUnix int64  `json:"verify_failed_at_unix,omitempty"`
 
+	// ReplicaIncomplete is armed on a domain whose disks are being rewritten
+	// from scratch, and cleared by the same write that records the rebuild
+	// succeeding. Anything still carrying it is a replica whose rebuild DIED
+	// part way: the disks beside it are a half-written copy, and the domain's
+	// own metadata -- last_checkpoint, last_sync, failure_count -- still
+	// describes the complete copy that rebuild renamed aside.
+	//
+	// That combination is what makes this worth carrying, and it is not
+	// covered by anything else reported here. A full sync into an existing
+	// target renames the good disks to <disk>.vmsync-replaced-<stamp> and
+	// writes new base images in their place while the metadata stays as it
+	// was, so an interrupted run leaves a domain that looks healthy by every
+	// other measure on this page: no failure count, a recent checkpoint, a
+	// recent sync, and a status of ok. Promoting it boots a guest onto a
+	// truncated disk while the complete copy sits unused under the
+	// .vmsync-replaced-<stamp> suffix.
+	//
+	// Kept RAW, exactly as the agent reported it, and parsed only where it is
+	// rendered. It is a single-line comma-separated k=v value
+	// (verb, at, action, host, aside) written by the engine, and this console
+	// neither writes it nor decides anything from it -- the refusal lives in
+	// vmsync, on the host holding the disks, because a promotion runs there
+	// during a disaster with the source host gone. What is decided here is
+	// only what to show, and a value this build cannot read must still show
+	// as a warning rather than vanish.
+	//
+	// UPGRADE ORDER: as with the verification record above, this must exist
+	// here before any agent that sends it is deployed. The report body is
+	// decoded with DisallowUnknownFields, so an agent upgraded first has its
+	// ENTIRE report rejected -- domains, roles, sync results and all -- not
+	// just this field. Upgrade the UI, then the engines, then the agents.
+	ReplicaIncomplete string `json:"replica_incomplete,omitempty"`
+
 	Disks []ReportDisk `json:"disks,omitempty"`
 	// RestorePoints is what this replica can be rolled back to, newest
 	// first.

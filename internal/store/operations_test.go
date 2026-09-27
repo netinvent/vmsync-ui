@@ -337,6 +337,86 @@ func TestOperationCompletesItsAuditEntry(t *testing.T) {
 	}
 }
 
+// The correlation id an operator follows across three programs that share no
+// storage: this UI's audit entry, the operation published to the agent, and
+// the journal the engine writes beside the disks it touched.
+//
+// It must be the AUDIT entry's own id, not a second identifier minted here.
+// The case this exists for is reading back what happened to a replica found
+// half-written: the journal on the hypervisor says what the engine did, and
+// the only thing that can say who asked for it and why is the audit entry at
+// the other end of this id. Correlating the two by timestamp instead is
+// exactly what goes ambiguous when a run was retried, which is the situation
+// an interrupted rebuild tends to produce.
+//
+// And it must reach the AGENT, since the agent is what passes it to the
+// engine as -action-id. An id recorded here but never published would join
+// nothing to nothing.
+func TestAnOperationCarriesItsAuditEntryAsACorrelationID(t *testing.T) {
+	s, _, dr := twoAgents(t)
+	auditID, err := s.AppendAudit("alice", "promote", "web01", "forced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := s.CreateOperation(dr, auditID, promoteOperation(), opNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ActionID != auditID {
+		t.Errorf("ActionID = %q, want the audit id %q -- without it the engine's journal on the "+
+			"hypervisor cannot be tied back to who asked for the run or why", rec.ActionID, auditID)
+	}
+
+	cfg, _, err := s.AgentConfigFor(dr)
+	if err != nil {
+		t.Fatalf("AgentConfigFor: %v", err)
+	}
+	if len(cfg.Operations) != 1 {
+		t.Fatalf("published %d operations, want 1", len(cfg.Operations))
+	}
+	if cfg.Operations[0].ActionID != auditID {
+		t.Errorf("the published operation carries ActionID %q, want %q -- the agent is what passes "+
+			"this to the engine as -action-id, so one that never leaves this store correlates nothing",
+			cfg.Operations[0].ActionID, auditID)
+	}
+}
+
+// An operation issued with no audit entry carries no correlation id, rather
+// than a fabricated one.
+//
+// Fail closed on the unknown: an id here that matched no audit entry would
+// send somebody reading a journal record looking for an intent that was
+// never written, which is worse than an empty field saying plainly that
+// nothing recorded this.
+func TestAnOperationWithNoAuditEntryCarriesNoCorrelationID(t *testing.T) {
+	s, _, dr := twoAgents(t)
+	rec, err := s.CreateOperation(dr, "", promoteOperation(), opNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ActionID != "" {
+		t.Errorf("ActionID = %q, want empty -- an id joining a journal record to an audit entry "+
+			"that does not exist is a false trail", rec.ActionID)
+	}
+}
+
+// A caller that chose its own correlation id keeps it. The audit entry is
+// the default, not an override: a future path that has to reuse one id
+// across two operations -- a rebuild retried after an interruption, say --
+// must be able to say so without this silently renaming it.
+func TestAnExplicitCorrelationIDIsNotOverwritten(t *testing.T) {
+	s, _, dr := twoAgents(t)
+	op := promoteOperation()
+	op.ActionID = "9f3c1a2b4d5e6f70"
+	rec, err := s.CreateOperation(dr, "some-audit-id", op, opNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ActionID != "9f3c1a2b4d5e6f70" {
+		t.Errorf("ActionID = %q, want the caller's own id kept", rec.ActionID)
+	}
+}
+
 // TestUnknownResultIsNotAnError: the agent re-sends until acknowledged, so a
 // result for something already cleaned up here is an acknowledgement
 // arriving late, not a fault.

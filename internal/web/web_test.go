@@ -263,6 +263,307 @@ func TestDashboardFlagsAReplicaKnownNotToMatchItsSource(t *testing.T) {
 	}
 }
 
+// The board's hardest case: a replica whose rebuild was interrupted.
+//
+// Everything the dashboard normally judges a pair by is, on such a row,
+// truthful about a copy that is no longer on disk. The interrupted run
+// renamed the good disks aside and began writing new ones, and it never
+// updated the metadata -- so the checkpoint, the lag and the failure count
+// still describe the copy it displaced. The pair therefore renders as a
+// perfectly ordinary healthy one, which is exactly how a half-written
+// replica went unnoticed until somebody promoted it.
+//
+// The clean pair beside it is not decoration. A marker rendered
+// unconditionally would flag the whole estate, and a board that shouts about
+// every row says nothing about any of them.
+func TestDashboardFlagsAReplicaLeftHalfWrittenByAnInterruptedRebuild(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=reinit,at=1758441600,action=9f3c1a2b4d5e6f70,host=hyper02p,aside=1758441600"
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
+			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok"},
+		}},
+		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+			// Healthy by every column this page has: ok, two minutes
+			// behind, no failed attempts, a checkpoint -- and its disks are
+			// a partial copy.
+			{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "ok", AgeSeconds: 120,
+				LastCheckpoint: "vmsync-1758441000", ReplicaIncomplete: raw},
+			{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 120},
+		}},
+	}
+
+	d := BuildDashboard(agents, reports, now)
+	var bad, clean Pair
+	for _, p := range d.Pairs {
+		switch p.TargetVM {
+		case "db01":
+			bad = p
+		case "web01":
+			clean = p
+		}
+	}
+	if !bad.ReplicaPartial() {
+		t.Fatal("the pair does not carry the target's interrupted-rebuild marker, so nothing downstream can render it")
+	}
+	if bad.ReplicaPartialUnreadable() {
+		t.Error("a value in the engine's own grammar read as unreadable")
+	}
+	if bad.ReplicaPartialVerb() != "reinit" {
+		t.Errorf("ReplicaPartialVerb() = %q, want reinit", bad.ReplicaPartialVerb())
+	}
+	if bad.ReplicaPartialAt() == "" {
+		t.Error("the date of the interrupted rebuild is not exposed; a bare marker cannot tell last night from last month")
+	}
+	if bad.ReplicaPartialHost() != "hyper02p" {
+		t.Errorf("ReplicaPartialHost() = %q, want hyper02p", bad.ReplicaPartialHost())
+	}
+	if bad.ReplicaPartialAside() != ".vmsync-replaced-1758441600" {
+		t.Errorf("ReplicaPartialAside() = %q, want the suffix the complete copy was renamed with",
+			bad.ReplicaPartialAside())
+	}
+	if clean.ReplicaPartial() {
+		t.Error("a replica with no marker reports one -- an alarm on every row is one nobody reads")
+	}
+	// The trap, restated as an assertion: this row still looks fine by every
+	// measure the board had before. If that ever stops being true the test
+	// has stopped covering the case it was written for.
+	if bad.Status != "ok" || bad.FailureCount != 0 {
+		t.Fatalf("the fixture no longer models a row that reads healthy: status=%q failures=%d",
+			bad.Status, bad.FailureCount)
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "dashboard.html", pageData{
+		User:      auth.User{Username: "op", Role: auth.RoleAdmin},
+		Active:    "dashboard",
+		Dashboard: d,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	for _, want := range []string{
+		// The marker itself, beside the status rather than instead of it.
+		"partial copy",
+		// The dated explanation, and the two facts that are not guessable
+		// from anything else on the row.
+		bad.ReplicaPartialAt(),
+		"never recorded finishing",
+		"describes a different copy",
+		".vmsync-replaced-1758441600",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the rendered board is missing %q, so a half-written replica reads as healthy", want)
+		}
+	}
+	// The status word survives alongside the pill. Replacing it would trade
+	// one true fact for another instead of showing both.
+	if !strings.Contains(html, `<span class="pill s-ok">ok</span>`) {
+		t.Error("the marker replaced the status rather than sitting beside it")
+	}
+	// Two pairs go through one template, and only one of them is affected.
+	if n := strings.Count(html, "PARTIAL COPY"); n != 1 {
+		t.Errorf("the explanation appears %d times for one affected replica out of two", n)
+	}
+}
+
+// An unreadable value is the case that decides whether this marker can be
+// trusted at all. It must warn anyway, show the operator the exact text the
+// agent reported, and say plainly that the detail could not be read -- the
+// alternative, dropping a row whose value came from a newer engine, is a
+// silent green board over a replica nobody can promote.
+func TestDashboardStillWarnsWhenThePartialCopyValueCannotBeRead(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=rebase-overlay,at=1758441600,host=hyper02p"
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
+		}},
+		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+			{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "ok", AgeSeconds: 120,
+				ReplicaIncomplete: raw},
+		}},
+	}
+
+	d := BuildDashboard(agents, reports, now)
+	p := d.Pairs[0]
+	if !p.ReplicaPartial() {
+		t.Fatal("a value this build cannot parse dropped the marker, which is the one direction it must never fail in")
+	}
+	if !p.ReplicaPartialUnreadable() {
+		t.Fatal("an unknown verb was reported as understood, so the page would explain a run it knows nothing about")
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "dashboard.html", pageData{
+		User:      auth.User{Username: "op", Role: auth.RoleAdmin},
+		Active:    "dashboard",
+		Dashboard: d,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	for _, want := range []string{
+		"partial copy",
+		"PARTIAL COPY",
+		"could not read the detail",
+		// Verbatim, so an operator can act on evidence this build could not
+		// interpret.
+		raw,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the rendered board is missing %q for an unreadable marker", want)
+		}
+	}
+}
+
+// dashboardPartialCopyFixture is one pair whose replica carries the given
+// marker beside an identical pair that carries none.
+//
+// The clean pair is load-bearing rather than padding: both go through the
+// same template, so it is what proves anything the affected row prints is
+// conditional. A detail rendered on every row is a detail nobody reads.
+func dashboardPartialCopyFixture(raw string) ([]store.Agent, map[string]store.Report) {
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()},
+		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
+			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok"},
+		}},
+		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+			{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "ok", AgeSeconds: 120,
+				LastCheckpoint: "vmsync-1758441000", ReplicaIncomplete: raw},
+			{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 120},
+		}},
+	}
+	return agents, reports
+}
+
+// The correlation id is the one part of this marker that leads anywhere off
+// the row, and until now it was parsed and then shown nowhere.
+//
+// Everything else the explanation prints describes the wreck; this is the
+// string that joins the row to the console's own audit entry for the run --
+// who started it and when -- and to the journal the engine wrote beside the
+// disks. The README documents it as the id to grep the hypervisor with,
+// which it cannot be while the console keeps it to itself. A value parsed,
+// stored and never rendered is the same shape of defect as a verdict nothing
+// reads.
+func TestTheDashboardPrintsTheActionIdOfAnInterruptedRebuild(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=reinit,at=1758441600,action=9f3c1a2b4d5e6f70,host=hyper02p,aside=1758441600"
+	agents, reports := dashboardPartialCopyFixture(raw)
+
+	d := BuildDashboard(agents, reports, now)
+	var bad, clean Pair
+	for _, p := range d.Pairs {
+		switch p.TargetVM {
+		case "db01":
+			bad = p
+		case "web01":
+			clean = p
+		}
+	}
+	if bad.ReplicaPartialAction() != "9f3c1a2b4d5e6f70" {
+		t.Fatalf("ReplicaPartialAction() = %q, want the id the engine stamped the run with -- "+
+			"without it the marker names no record anyone can go and read", bad.ReplicaPartialAction())
+	}
+	if clean.ReplicaPartialAction() != "" {
+		t.Errorf("a replica with no marker reports the action id %q", clean.ReplicaPartialAction())
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "dashboard.html", pageData{
+		User:      auth.User{Username: "op", Role: auth.RoleAdmin},
+		Active:    "dashboard",
+		Dashboard: d,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	// Rendered, and rendered as something meant to be copied: this id is
+	// typed into a grep on the hypervisor, so it may not arrive reflowed into
+	// prose.
+	if !strings.Contains(html, "<code>9f3c1a2b4d5e6f70</code>") {
+		t.Error("the board never prints the correlation id, so the audit entry and the hypervisor's " +
+			"journal for this rebuild cannot be found from the page that reports it")
+	}
+	// And said to be for something. A bare hex string beside a warning is
+	// noise; the words are what make it actionable.
+	if !strings.Contains(html, "audit log") {
+		t.Error("the id is printed with nothing saying what to do with it")
+	}
+	// Once, for the one affected replica out of two.
+	if n := strings.Count(html, "9f3c1a2b4d5e6f70"); n != 1 {
+		t.Errorf("the correlation id appears %d times for one affected replica out of two", n)
+	}
+}
+
+// A marker written by an engine that predates the field carries no action=,
+// and that costs the trail and nothing else.
+//
+// The failure this guards against is the lazy fix: printing the id
+// unconditionally, which leaves an empty <code></code> sitting in the warning
+// of every replica whose rebuild died under an older engine. That reads as a
+// value that should be there and is missing, which is worse than saying
+// nothing -- an operator would go looking for a record that was never
+// written.
+func TestTheDashboardPrintsNoActionIdWhenTheMarkerCarriesNone(t *testing.T) {
+	s := testServer(t)
+	const raw = "verb=reinit,at=1758441600,host=hyper02p,aside=1758441600"
+	agents, reports := dashboardPartialCopyFixture(raw)
+
+	d := BuildDashboard(agents, reports, now)
+	var bad Pair
+	for _, p := range d.Pairs {
+		if p.TargetVM == "db01" {
+			bad = p
+		}
+	}
+	if !bad.ReplicaPartial() || bad.ReplicaPartialUnreadable() {
+		t.Fatalf("the fixture no longer models a readable marker: partial=%v unreadable=%v",
+			bad.ReplicaPartial(), bad.ReplicaPartialUnreadable())
+	}
+	if bad.ReplicaPartialAction() != "" {
+		t.Fatalf("ReplicaPartialAction() = %q for a value carrying no action=", bad.ReplicaPartialAction())
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "dashboard.html", pageData{
+		User:      auth.User{Username: "op", Role: auth.RoleAdmin},
+		Active:    "dashboard",
+		Dashboard: d,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := buf.String()
+
+	if strings.Contains(html, "<code></code>") {
+		t.Error("an empty code element reached the page, which reads as a correlation id that went missing " +
+			"rather than one that was never written")
+	}
+	// The rest of the warning is untouched by the absence: the row is still
+	// a replica nobody may promote, and that never depended on the id.
+	if !strings.Contains(html, "PARTIAL COPY") {
+		t.Error("a marker carrying no action id lost the explanation entirely")
+	}
+}
+
 func TestBuildDashboardPairsComeFromTheTarget(t *testing.T) {
 	// vmsync writes last_sync and failure_count onto the TARGET, so a pair's
 	// freshness lives there. Building rows from the source would report

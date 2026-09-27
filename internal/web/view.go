@@ -64,6 +64,25 @@ type Pair struct {
 	VerifyState        string
 	VerifyFailedAtUnix int64
 
+	// ReplicaIncomplete is the target's raw replica_incomplete value: a
+	// rebuild of this replica's disks started and never recorded finishing.
+	//
+	// On this row for the same reason the verification record is, and it is
+	// the sharper of the two. A verification failure at least moves the
+	// status; this moves NOTHING. The metadata the rest of this row is built
+	// from -- the checkpoint, the age, the failure count -- was written by
+	// the sync BEFORE the interrupted one, and describes the complete copy
+	// that rebuild renamed aside, not the half-written disks now sitting in
+	// its place. So every column here says healthy, truthfully, about a
+	// different copy than the one on disk. The marker is the only thing that
+	// says which.
+	//
+	// Raw, and parsed only where it is rendered. Nothing on this page
+	// branches on it: the refusal lives in vmsync on the host holding the
+	// disks, because that is the one place that can still be read when the
+	// source host is gone.
+	ReplicaIncomplete string
+
 	// SourceSeen is false when no agent reported a source domain matching
 	// this target's replica_source. That is worth showing: it means either
 	// the source host has no agent, or its agent is down, and in both cases
@@ -108,6 +127,66 @@ func (p Pair) VerifyFailedAt() string {
 		return ""
 	}
 	return time.Unix(p.VerifyFailedAtUnix, 0).UTC().Format("2006-01-02 15:04 UTC")
+}
+
+// ReplicaPartial reports that a rebuild of this replica's disks armed the
+// interrupted-copy marker and never cleared it, so what is on disk is a
+// half-written copy.
+//
+// Presence is the state, exactly as with VerifyFailed, and for a stronger
+// version of the same reason: the engine clears this field in the SAME
+// metadata write that records the rebuild succeeding, so anything left here
+// is a run that did not get that far. Testing for presence rather than for
+// any particular content also means a value written by a newer engine, or
+// one this build cannot parse at all, still flags the row -- which is the
+// only acceptable direction for a signal whose absence reads as "safe to
+// promote".
+func (p Pair) ReplicaPartial() bool { return p.ReplicaIncomplete != "" }
+
+// ReplicaPartialUnreadable says the marker is present but this build could
+// not make sense of the value.
+//
+// Rendered as a warning with the raw text beside it rather than dropped. The
+// fact that matters -- a rebuild armed this and never cleared it -- is
+// carried by the field EXISTING, and none of the detail is needed to act on
+// it: the replica must not be promoted either way.
+func (p Pair) ReplicaPartialUnreadable() bool {
+	return p.ReplicaIncomplete != "" && !parsePartialCopy(p.ReplicaIncomplete).Readable
+}
+
+// ReplicaPartialVerb, ReplicaPartialAt, ReplicaPartialAction,
+// ReplicaPartialHost and ReplicaPartialAside break the value out for the
+// explanation beside the marker. Each is empty when the value did not carry
+// that part, so the sentence degrades a clause at a time instead of failing
+// whole.
+func (p Pair) ReplicaPartialVerb() string { return parsePartialCopy(p.ReplicaIncomplete).Verb }
+
+// ReplicaPartialAt is when the interrupted rebuild started.
+func (p Pair) ReplicaPartialAt() string { return parsePartialCopy(p.ReplicaIncomplete).At() }
+
+// ReplicaPartialAction is the correlation id the run that died was issued
+// under, and the only part of this marker that leaves the row.
+//
+// The other clauses describe the damage; this one is what makes it
+// investigable. The same id is on this console's audit entry -- who asked for
+// the rebuild and when -- and in the journal the engine wrote beside the
+// disks, so it is the single string that walks an operator from a pill on
+// this board to the record of what actually ran. Without it the three
+// programs keeping those records are correlated by timestamp alone, which
+// stops working precisely when a run was retried, and a retried rebuild is
+// what an interrupted one usually becomes. Empty for a marker written before
+// the field existed: an absent id costs the trail, never the warning.
+func (p Pair) ReplicaPartialAction() string { return parsePartialCopy(p.ReplicaIncomplete).ActionID }
+
+// ReplicaPartialHost is the machine that ran the interrupted rebuild and was
+// expected to finish it, as the engine recorded it -- the source for a
+// rebuild, the replica's own host for a restore.
+func (p Pair) ReplicaPartialHost() string { return parsePartialCopy(p.ReplicaIncomplete).Host }
+
+// ReplicaPartialAside is the filename suffix the displaced disks were
+// renamed with, which is where the complete copy may still be.
+func (p Pair) ReplicaPartialAside() string {
+	return parsePartialCopy(p.ReplicaIncomplete).AsideSuffix()
 }
 
 // SourceFresh reports whether the source's runtime state is current enough
@@ -356,6 +435,14 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					// source has no idea its copy failed a comparison.
 					VerifyState:        dom.VerifyState,
 					VerifyFailedAtUnix: dom.VerifyFailedAtUnix,
+
+					// Likewise straight from the target's report, and
+					// likewise underivable: the marker lives on the domain
+					// whose disks were being rewritten, and only its own
+					// agent reads it. The source has no idea its rebuild
+					// died -- which is the whole problem, because the
+					// source is where a resync would be started from.
+					ReplicaIncomplete: dom.ReplicaIncomplete,
 				}
 				p.SourceReportAgeSeconds = -1
 				if seen && src.reportedAt > 0 {

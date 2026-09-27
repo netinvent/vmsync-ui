@@ -150,6 +150,71 @@ func TestADomainWithNoVerificationFindingCarriesNone(t *testing.T) {
 	}
 }
 
+// The interrupted-rebuild marker, under the one name the engine writes and
+// the agent forwards.
+//
+// Raw JSON with DisallowUnknownFields for the same reason as the test above,
+// and the stakes here are the highest of any field on this type. A name that
+// does not match does not merely lose the marker: it rejects the entire
+// report from every host that has been upgraded, so the console shows an
+// estate that has apparently gone silent. And the field itself is the ONLY
+// signal distinguishing a half-written replica from a healthy one -- the
+// checkpoint, the sync time and the failure count beside it all describe the
+// complete copy the interrupted rebuild renamed aside, and all of them read
+// as fine.
+//
+// The value is kept as the single opaque line the engine wrote. Parsing
+// belongs where it is rendered; this side only has to carry it intact,
+// including whatever a newer engine puts in it.
+func TestAnInterruptedRebuildDecodesFromTheAgentsWireFormat(t *testing.T) {
+	const raw = "verb=reinit,at=1758441600,action=9f3c1a2b4d5e6f70,host=hv-a,aside=1758441600"
+	const body = `{
+	  "name": "db01",
+	  "active": false,
+	  "replica_source": "hyper01p:db01",
+	  "failure_count": 0,
+	  "last_checkpoint": "vmsync-1758441000",
+	  "last_sync_unix": 1758441000,
+	  "replica_incomplete": "` + raw + `",
+	  "status": "ok",
+	  "age_seconds": 120
+	}`
+
+	var d ReportDomain
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&d); err != nil {
+		t.Fatalf("decode: %v -- a name that does not match the agent's rejects the whole report, "+
+			"which in production looks like every upgraded host going offline at once", err)
+	}
+	if d.ReplicaIncomplete != raw {
+		t.Errorf("ReplicaIncomplete = %q, want %q verbatim -- without it a replica holding a "+
+			"half-written copy is promoted with nothing on the page saying so", d.ReplicaIncomplete, raw)
+	}
+	// The trap this field exists for: everything beside it still reads
+	// healthy, because it was written by the sync BEFORE the one that died.
+	if d.FailureCount != 0 || d.Status != "ok" || d.LastCheckpoint == "" {
+		t.Errorf("the fixture no longer models the case that matters -- a domain that looks fine "+
+			"by every other measure: %+v", d)
+	}
+}
+
+// The other half, and the one that decides whether the marker is usable at
+// all: an ordinary replica must decode to no marker. The field is omitempty
+// on the wire, so all but a handful of domains in an estate arrive without
+// it, and a zero value that read as "incomplete" would put a partial-copy
+// warning on every row -- which is the same as putting one on none.
+func TestADomainWithNoInterruptedRebuildCarriesNone(t *testing.T) {
+	var d ReportDomain
+	if err := json.Unmarshal([]byte(`{"name":"web01","active":true,"failure_count":0,"status":"ok","age_seconds":30}`), &d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.ReplicaIncomplete != "" {
+		t.Errorf("a domain with no interrupted rebuild decoded to ReplicaIncomplete:%q, want empty",
+			d.ReplicaIncomplete)
+	}
+}
+
 // A degraded run is a SUCCESS that still needs somebody. Succeeded() must
 // keep saying true -- the sync did work, and anything keyed off it (staleness,
 // failure counting, -reinit-after-failures) must not start treating a frozen

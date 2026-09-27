@@ -152,6 +152,21 @@ Ordered worst-first, because the page is read to find what needs attention.
   it means: vmsync refuses every sync into the replica while the finding
   stands, a plain full resync included, and the repair is a sync set to recopy
   once and re-verify, which clears it only if that second comparison passes.
+- **Partial copy** is a third pill, also *beside* the status, for a replica
+  whose rebuild was interrupted. It is the one marker on the board that
+  contradicts every other cell on its row, and the reason is worth
+  understanding: a full copy into an existing target renames the good disks to
+  `<disk>.vmsync-replaced-<stamp>` and writes new base images in their place
+  *without* touching the domain's metadata, which is only updated when the run
+  finishes. So a run that dies part way leaves a recent checkpoint, a small
+  lag and a failure count of zero — all truthful, and all about the copy that
+  was renamed aside rather than the disks now sitting there. Nothing else on
+  the board moves. The dated explanation on the target cell says the replica is
+  a partial copy, that the metadata beside it describes the copy the rebuild
+  replaced, and that the complete copy may still be on the host under the
+  `.vmsync-replaced-<stamp>` suffix; the source cell repeats the headline,
+  because a resync runs from the source and the source's own metadata knows
+  none of this.
 - Reasons appear on the row, not behind a click.
 
 Freshness always comes from the **target**, because that is where vmsync
@@ -161,6 +176,14 @@ metadata records where it replicates to, never when. The verification record
 report, but it is not a freshness fact at all: freshness says how far behind a
 copy is, the record says it does not match, and a copy that is wrong does not
 become right by being recent.
+
+`replica_incomplete` comes from the target too, and it is the one field that
+tells you the freshness figures beside it are about **different disks**. It is
+carried raw and parsed only where it is rendered; nothing in this console
+branches on it. The refusal it exists to justify lives in vmsync, on the host
+holding the disks, because `-promote` runs there during a disaster with the
+source host gone — so a value this console cannot parse still renders as a
+warning, with the agent's own text shown verbatim, rather than disappearing.
 
 ## The agent-facing API
 
@@ -318,6 +341,28 @@ direction has no checkpoint chain and must be a full reinit, which the
 schedule cannot yet express; enabled, it would schedule a run that fails
 every interval.
 
+### The correlation id
+
+Every operation carries an **`action_id`**, and it is this UI's own audit
+entry id rather than a second identifier minted for the purpose. The agent
+passes it to the engine as `-action-id`, and the engine stamps it into the
+intent and outcome records it journals beside the disks it touched.
+
+That is what closes a loop across three programs that keep separate records
+and share no storage: the audit entry says who asked and why, the operation
+says what was published to which agent, and the journal on the hypervisor says
+what the engine then did. The case it exists for is the one nobody plans for
+— somebody is holding a replica whose rebuild died, and needs to know what
+ran, under whose hand, and whether it was the first attempt or the third.
+Correlating three records by timestamp answers that until a run was retried,
+which is exactly the situation an interrupted rebuild tends to produce.
+
+It is optional and `omitempty` in both directions. An operation issued before
+the field existed carries none, an operation issued with no audit entry
+carries none rather than a fabricated id pointing at an intent nobody wrote,
+and an agent too old to know the field ignores it — the config an agent polls
+is decoded leniently, unlike the reports it sends.
+
 An operation can be **cancelled** while it has not reported. After that it
 fails loudly rather than pretending — the work has happened on a hypervisor
 and no UI state undoes it. An expired operation is still published on
@@ -333,20 +378,33 @@ and the symptom looks like every upgraded host going offline at once.
 
 This has applied to `operation_results`, to the fence fields (`fence_id`,
 `fence_source`, `fence_armed_at_unix`, `fence_armed_by` and the `fenced`
-object), and now to the verification record (`verify_state`,
-`verify_failed_at_unix`). It applies to every future addition too, which is
-why both halves of the contract are pinned by tests that name the strings
-literally: `TestAReportCarryingFenceStateIsAccepted` and
-`TestAReportCarryingAVerificationFailureIsAccepted` here, and
+object), to the verification record (`verify_state`, `verify_failed_at_unix`),
+and now to `replica_incomplete`. It applies to every future addition too,
+which is why both halves of the contract are pinned by tests that name the
+strings literally: `TestAReportCarryingFenceStateIsAccepted`,
+`TestAReportCarryingAVerificationFailureIsAccepted` and
+`TestAReportCarryingAnInterruptedRebuildIsAccepted` here, and
 `TestSendReportCarriesFenceStateUnderTheAgreedNames` and
 `TestSendReportCarriesVerifyStateUnderTheAgreedNames` in the agent. Changing
 one without the other fails there rather than in the field.
 
-Both verification fields are `omitempty`, which is why the order still
-matters in spite of how rare the finding is: a report from an agent ahead of
-its UI decodes cleanly for every healthy domain and is rejected outright the
-first time a replica fails a verification — the symptom would arrive weeks
-after the upgrade that caused it, on exactly the host with something wrong.
+The verification fields and `replica_incomplete` are all `omitempty`, which is
+why the order still matters in spite of how rare each condition is: a report
+from an agent ahead of its UI decodes cleanly for every healthy domain and is
+rejected outright the first time a replica fails a verification or a rebuild
+is interrupted — the symptom would arrive weeks after the upgrade that caused
+it, on exactly the host with something wrong.
+
+For `replica_incomplete` the order is **UI first, then engines, then agents**,
+because a third program is involved: the engine is what arms and clears the
+field, and `-promote` is what refuses on the strength of it. That refusal
+rests on this field alone — nothing writes a `failure_count` alongside it as a
+second carrier — so an engine too old to know the field will still accept a
+half-written replica, on the DR host, during the incident. **Every host that
+drives syncs or promotions has to be upgraded before the refusal can be relied
+on.** Until then this console's warnings are the only thing standing between
+an operator and a partial copy, which is an argument for reading them, not for
+trusting them as an interlock.
 
 **The other direction is lenient, deliberately.** An agent decodes the
 config it polls without `DisallowUnknownFields`, so a newer UI sending a
@@ -429,6 +487,60 @@ and what it deliberately cannot*), so withdrawing the button would not prevent
 the promotion — it would only hide it from the one place that explains what is
 wrong, while `vmsync -promote -force-promote` on the hypervisor stays exactly
 as available. The console reports and warns; the engine refuses.
+
+### A replica left half-written by an interrupted rebuild
+
+A full copy into an existing target — `-reinit`, a force-clean, an ordinary
+full sync — renames the replica's good disks to
+`<disk>.vmsync-replaced-<stamp>` and writes new base images in their place,
+with no overlay, while the target domain keeps its **old** metadata. Only a
+run that finishes updates that metadata. So a run killed part way — a dropped
+link, a restarted agent, a power loss — leaves a domain whose disks are a
+truncated copy and whose `last_checkpoint`, `last_sync` and `failure_count`
+all describe the complete copy it renamed aside.
+
+Nothing else on this page moves. The role is unchanged, the status is
+unchanged, and **`contents as of` is computed from that stale record**, so the
+one figure a promoting operator reads as the data-loss window is not about the
+disks at all. vmsync arms `replica_incomplete` on the domain before it starts
+writing and clears it in the same metadata write that records success, and
+this page shows what survives:
+
+- a **partial copy** pill on the replica's row, beside the role like the
+  verification one and for a harder reason — that marker at least moves the
+  status word, and this one moves nothing;
+- a dated explanation under the row naming the verb that armed it, when that
+  run started, which host it was writing to, and the `.vmsync-replaced-<stamp>`
+  suffix the **complete** copy may still be sitting under. That last part is
+  the actionable half: nothing removes those files for you, and they are
+  usually the last whole copy of the VM on that host;
+- the same pill and explanation on the **source's** row, because **Full
+  resync** is offered there and is the only repair — the marker is cleared by
+  the same write that records a rebuild succeeding, so nothing but a run that
+  finishes clears it. The source's own metadata records none of this: it does
+  not know the copy it wrote died half way;
+- and a warning on the promote cell, **outside** the collapsed control and
+  repeated as a pill on its summary. Open it and the form says vmsync will
+  refuse the promotion, that only **force** gets past that refusal, and that
+  forcing changes what vmsync allows rather than how much of the copy exists.
+  It points at the displaced disks first: promoting the complete older copy by
+  putting those files back loses a *known* amount of data, while promoting the
+  partial one loses an unknown amount.
+
+**An unreadable value still warns.** The value is a single comma-separated
+`k=v` line, parsed here only for display, and a verb from a newer vmsync — or
+a corrupted value — renders the warning anyway with the agent's own text shown
+verbatim beside it. The absence of this marker is what reads as *safe to
+promote*, so it may only ever fail towards the alarm. Unknown keys are ignored
+rather than poisoning the parse, which is what stops the first key a newer
+engine adds from turning every affected row into an unexplained blob.
+
+**The refusal is not this console's.** It lives in vmsync, on the host holding
+the disks, because `-promote` and `-restore` run locally on the target and
+during a real disaster the source host is gone — anything a refusal depends on
+has to be readable on the survivor. This page reports and explains; see
+*Upgrade order* for why every engine that drives syncs must be upgraded before
+that refusal can be relied on.
 
 ### Storage, beside the decision that spends it
 

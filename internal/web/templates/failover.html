@@ -59,6 +59,14 @@
                  staleness age; the only thing on the row saying its contents
                  are wrong rather than merely old is this. */}}
             {{if .VerifyFailed}}<span class="pill s-crit">verify failed</span>{{end}}
+            {{/* Beside the role like the one above, and for a harder reason.
+                 A verification failure at least moves the status word; an
+                 interrupted rebuild moves nothing at all, because the
+                 metadata it is judged by was written by the previous sync
+                 and describes the copy this one renamed aside. Every pill
+                 and figure on this row stays exactly as it was. This is the
+                 only mark that the disks changed underneath them. */}}
+            {{if .ReplicaPartial}}<span class="pill s-crit">partial copy</span>{{end}}
             {{if .Active}}<span class="pill s-ok">running</span>{{else}}<span class="pill s-none">stopped</span>{{end}}
             <div class="warnline">{{.Hostname}}</div>
             {{if .AgentStale}}<div class="warnline">agent stale — an action will not arrive until it checks in</div>{{end}}
@@ -82,6 +90,46 @@
                 <em>Force clean resync</em> is the one control that does go through, and it does not
                 clear the finding — it discards it without re-verifying, leaving the copy unproven
                 rather than known good, and nothing afterwards says it ever failed.
+              </div>
+            {{end}}
+            {{if .ReplicaPartial}}
+              <div class="warnline">
+                <strong>PARTIAL COPY — a rebuild of these disks was interrupted.</strong>
+                {{if .ReplicaPartialVerb}}A {{.ReplicaPartialVerb}}{{else}}A full copy{{end}} into {{.VM}}
+                started{{if .ReplicaPartialAt}} on {{.ReplicaPartialAt}}{{end}}{{if .ReplicaPartialHost}}, run from {{.ReplicaPartialHost}}{{end}},
+                renamed the previous disks aside, began writing new ones and never recorded
+                finishing — a network drop, a restarted agent or a power loss all leave exactly
+                this. What is on disk is however much of the copy that run had written.
+                <strong>The metadata beside it describes the copy it replaced, not these disks:</strong>
+                the role, the checkpoint{{if .ContentsAsOf}} and the "contents as of" line above{{end}}
+                were all written by the sync BEFORE the interrupted one.
+                {{if .ReplicaPartialAside}}
+                  The complete copy may still be on {{.Hostname}}, in the files ending
+                  <code>{{.ReplicaPartialAside}}</code> — nothing removes them for you, so check
+                  before anything is tidied up.
+                {{else}}
+                  Check {{.Hostname}} for files ending <code>.vmsync-replaced-&lt;time&gt;</code>: the
+                  complete copy is often still sitting in them, untouched.
+                {{end}}
+                {{/* The handle off this row. Standing in front of a replica
+                     that may not be promoted, the next question is always what
+                     ran and under whose hand -- and this id is the only thing
+                     that answers it, because the same string is on this
+                     console's audit entry and in the journal the engine left
+                     beside the disks. Guarded: an older engine wrote no id,
+                     and an empty box would read as a missing one. */}}
+                {{if .ReplicaPartialAction}}
+                  That run was recorded as <code>{{.ReplicaPartialAction}}</code> — the id to search
+                  this console's audit log and {{.Hostname}}'s vmsync journal with, which is what
+                  says who started the rebuild and what it reported before it stopped.
+                {{end}}
+                vmsync refuses to promote this domain while the marker stands. The repair is a full
+                resync from its source, which is offered on the source's own row.
+                {{if .ReplicaPartialUnreadable}}
+                  <br>This console could not read the detail the agent reported
+                  (<code>{{.ReplicaIncomplete}}</code>) — a newer vmsync, or a corrupted value. The
+                  warning stands either way: the marker exists, so the rebuild did not finish.
+                {{end}}
               </div>
             {{end}}
             {{if .ArmedFenceSource}}
@@ -127,6 +175,43 @@
                   until it has been rebuilt and re-proven
                 </div>
               {{end}}
+              {{/* The marker belongs to the far end, and this is the row that
+                   can repair it: Full resync and Force clean resync are both
+                   offered here, because a resync runs on the source. The
+                   source's own metadata records none of this -- it does not
+                   know the copy it wrote died half way -- so without this,
+                   the one row an operator would start the rebuild from is
+                   the row that never mentions the last one failed. */}}
+              {{if .PeerReplicaPartial}}
+                <span class="pill s-crit">partial copy</span>
+                <div class="warnline">
+                  this replica is a <strong>partial copy</strong>:
+                  {{if .PeerReplicaPartialVerb}}a {{.PeerReplicaPartialVerb}}{{else}}a full copy{{end}} into it
+                  started{{if .PeerReplicaPartialAt}} on {{.PeerReplicaPartialAt}}{{end}}{{if .PeerReplicaPartialHost}}, run from {{.PeerReplicaPartialHost}}{{end}}
+                  and never recorded finishing, so its disks hold however much that run had written.
+                  Its own metadata still describes the copy that rebuild renamed aside, which is why
+                  nothing else about it looks wrong.
+                  {{if .PeerReplicaPartialAside}}
+                    The complete copy may still be there in the files ending
+                    <code>{{.PeerReplicaPartialAside}}</code>.
+                  {{end}}
+                  {{/* Repeated here because this is the row the rebuild is
+                       fired from, and firing it again over a failure nobody
+                       looked at is how the same run dies twice. This id is
+                       what reaches the audit entry for the last attempt --
+                       the source's own metadata records none of it. */}}
+                  {{if .PeerReplicaPartialAction}}
+                    That run was recorded as <code>{{.PeerReplicaPartialAction}}</code> — the id to
+                    search this console's audit log and the replica host's vmsync journal with
+                    before starting another one.
+                  {{end}}
+                  vmsync refuses to promote it; <em>Full resync</em> below is the repair.
+                  {{if .PeerReplicaPartialUnreadable}}
+                    This console could not read the detail reported
+                    (<code>{{.PeerReplicaIncomplete}}</code>), which does not change the warning.
+                  {{end}}
+                </div>
+              {{end}}
             {{else}}
               <span class="note">—</span>
             {{end}}
@@ -165,8 +250,32 @@
               second comparison passes.
             </div>
             {{end}}
+            {{/* Outside the disclosure for the same reason the one above is,
+                 and with less margin for error: this copy is not merely
+                 unproven, it is known to be incomplete, and the figure an
+                 operator uses to weigh the promotion -- the data-loss window
+                 -- is computed from metadata that describes different
+                 disks. */}}
+            {{if .ReplicaPartial}}
+            <div class="warnline">
+              <strong>This replica is a partial copy.</strong>
+              {{if .ReplicaPartialVerb}}A {{.ReplicaPartialVerb}}{{else}}A full copy{{end}} into it
+              started{{if .ReplicaPartialAt}} on {{.ReplicaPartialAt}}{{end}} and never recorded
+              finishing, so its disks hold only part of what that run was writing. The metadata this
+              page reads its age and checkpoint from belongs to the copy that rebuild replaced, which
+              is why the data-loss window shown anywhere on this row is <strong>not</strong> the one
+              you would actually take. Promoting it boots the guest onto a truncated disk.
+              {{if .ReplicaPartialAside}}
+                Look on {{.Hostname}} for the files ending <code>{{.ReplicaPartialAside}}</code> first
+                — the complete copy this rebuild displaced is often still in them.
+              {{else}}
+                Look on {{.Hostname}} for files ending <code>.vmsync-replaced-&lt;time&gt;</code> first
+                — the complete copy this rebuild displaced is often still in them.
+              {{end}}
+            </div>
+            {{end}}
             <details class="act">
-              <summary>{{if .PromoteFinishesAStalledFailover}}Finish the failover — start it…{{else}}Promote…{{end}}{{if .VerifyFailed}} <span class="pill s-crit">verify failed</span>{{end}}</summary>
+              <summary>{{if .PromoteFinishesAStalledFailover}}Finish the failover — start it…{{else}}Promote…{{end}}{{if .VerifyFailed}} <span class="pill s-crit">verify failed</span>{{end}}{{if .ReplicaPartial}} <span class="pill s-crit">partial copy</span>{{end}}</summary>
               <form method="post" action="/failover/operation" class="inline">
                 {{if .VerifyFailed}}
                 <div class="note">
@@ -175,6 +284,19 @@
                   ticking it changes what vmsync allows, not what the copy contains. Go ahead only when
                   the source is gone and a copy proven wrong is better than no copy at all — and record
                   why, because nothing downstream will remember that this was deliberate.
+                </div>
+                {{end}}
+                {{if .ReplicaPartial}}
+                <div class="note">
+                  Because a rebuild of these disks was interrupted and never finished,
+                  <strong>vmsync will refuse this promotion</strong> on its own. Only
+                  <strong>force</strong> gets past that refusal, and it changes what vmsync allows,
+                  not how much of the copy exists — the guest boots onto whatever the dead run had
+                  written. Before ticking it, look on {{.Hostname}} for the disks this rebuild renamed
+                  aside{{if .ReplicaPartialAside}} (<code>{{.ReplicaPartialAside}}</code>){{end}}:
+                  promoting the <em>complete</em> older copy by putting those files back loses a known
+                  amount of data, while promoting this one loses an unknown amount. Go ahead only if
+                  neither they nor the source can be reached, and record why.
                 </div>
                 {{end}}
                 {{if .PromoteFinishesAStalledFailover}}
@@ -298,6 +420,19 @@
                   <strong>This is how you go back to replicating after a rollback</strong> — set the replica's
                   role to <em>target</em> first, or it will refuse to accept the copy.
                 </div>
+                {{if .PeerReplicaPartial}}
+                <div class="note">
+                  <strong>This is also the repair for the partial copy above</strong>, and the only one:
+                  the marker is cleared by the same write that records a rebuild succeeding, so nothing
+                  but a run that finishes can clear it. Until then the replica stays unpromotable, which
+                  is the intended state rather than a fault. If the last attempt died to something that
+                  has not been fixed — a flaky link, an agent being restarted mid-run — this one will
+                  die the same way and leave the replica no better off, so check that first. The disks
+                  the earlier rebuild renamed aside
+                  {{if .PeerReplicaPartialAside}}(<code>{{.PeerReplicaPartialAside}}</code>) {{end}}are
+                  the last complete copy of {{.VM}} on that host; keep them until this succeeds.
+                </div>
+                {{end}}
                 <button class="danger">Resync {{.VM}} in full</button>
               </form>
             </details>

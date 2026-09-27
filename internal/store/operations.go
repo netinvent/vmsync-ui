@@ -70,6 +70,27 @@ type Operation struct {
 	// than acted on.
 	Tag string `json:"tag,omitempty"`
 
+	// ActionID is the correlation id the agent passes to the engine as
+	// -action-id, and which the engine stamps into every intent and outcome
+	// record it journals beside the disks it touched.
+	//
+	// It is this UI's own audit entry id, deliberately, rather than a second
+	// identifier minted here. That is what closes the loop across three
+	// programs that each keep their own record and share no storage: the
+	// audit entry says who asked and why, the operation says what was
+	// published to which agent, and the journal on the hypervisor says what
+	// the engine then did to the disks. Without one id running through all
+	// three, an operator holding a half-written replica has to correlate
+	// them by timestamp, which is exactly the evidence that goes ambiguous
+	// when a run was retried.
+	//
+	// Optional and omitempty because it must stay so in both directions. An
+	// operation issued before this field existed carries none, and an agent
+	// too old to know it ignores it -- the config an agent polls is decoded
+	// leniently, unlike the reports it sends, which is what makes "UI first"
+	// a safe upgrade order rather than merely a preferred one.
+	ActionID string `json:"action_id,omitempty"`
+
 	CreatedAtUnix int64  `json:"created_at_unix"`
 	CreatedBy     string `json:"created_by,omitempty"`
 	NotAfterUnix  int64  `json:"not_after_unix,omitempty"`
@@ -260,6 +281,16 @@ func (s *Store) CreateOperation(agentID, auditID string, op Operation, now time.
 	op.CreatedAtUnix = now.Unix()
 	if op.NotAfterUnix == 0 {
 		op.NotAfterUnix = now.Add(OperationTTL).Unix()
+	}
+	// The correlation id travels as the AUDIT entry's id, set here rather
+	// than by each caller so no path can publish an operation that the
+	// journal on the hypervisor cannot be tied back to. A caller that
+	// already chose one is left alone; one issued with no audit entry at
+	// all -- which is every test fixture and nothing in the handlers --
+	// simply carries none, because an empty id is honest and a fabricated
+	// one would join a journal record to an audit entry that does not exist.
+	if op.ActionID == "" {
+		op.ActionID = auditID
 	}
 
 	rec := OperationRecord{Operation: op, AgentID: agentID, AuditID: auditID}
