@@ -105,6 +105,29 @@ type FailoverRow struct {
 	PromotionMode  string
 	LastSyncUnix   int64
 
+	// LastPromotedAt / LastPromotedAtUnix say this domain HAS SERVED LIVE at
+	// some point and has not been released -- the durable half of the
+	// promotion record, raw and parsed. Empty on nearly every row.
+	//
+	// The field that closes this page's worst gap. A copy failed over to and
+	// then shut down records role=paused and loses everything else: the three
+	// fields above go, the fence goes, and what is left is a row that reads
+	// exactly like an ordinary idle replica while its disks may hold the only
+	// copy of data that was serving an hour ago. This page then offered
+	// Restore over it, and offered Force clean resync over it from the
+	// source's row, with nothing between the click and a full overwrite.
+	//
+	// PeerLastPromotedAt is the same fact about the other end, and it is the
+	// one that matters most, for the reason PeerVerifyState and
+	// PeerReplicaIncomplete are both carried: the controls that destroy a
+	// replica -- Full resync, Force clean resync -- are offered on the
+	// SOURCE's row, so the row that can overwrite a copy which served live is
+	// not the row the record is on.
+	LastPromotedAt         string
+	LastPromotedAtUnix     int64
+	PeerLastPromotedAt     string
+	PeerLastPromotedAtUnix int64
+
 	// VerifyState and VerifyFailedAtUnix are this replica's recorded
 	// verification failure: it was compared against its own source and did
 	// not match, and the finding has not been cleared.
@@ -313,6 +336,20 @@ func (r FailoverRow) CanInvert() bool {
 // `target` when the promotion turned out to be unwanted.
 func (r FailoverRow) CanSetRole() bool { return r.AgentID != "" }
 
+// CanSetRoleTarget reports whether `target` may be among the roles offered.
+//
+// Its own predicate rather than a condition on CanSetRole, because the escape
+// hatch must not close: a copy that served live can still be set to `source`
+// (making it the primary, which destroys nothing) or `paused`. Only `target` is
+// withheld, and only that one because it is the value that hands the domain
+// back to the replication machinery -- after which the next scheduled sync
+// overwrites it, unattended, with the copy it displaced.
+//
+// The engine refuses it too, and that is the real guard; this keeps the option
+// out of the menu so the refusal is not something an operator discovers by
+// choosing it.
+func (r FailoverRow) CanSetRoleTarget() bool { return !r.ServedLive() }
+
 // CanRestore reports whether this domain can be rolled back to one of its
 // restore points.
 //
@@ -331,8 +368,26 @@ func (r FailoverRow) CanSetRole() bool { return r.AgentID != "" }
 // `paused` is deliberately allowed, and it is the common case: a restore
 // leaves the replica paused, so a first choice that turns out to be wrong can
 // be followed by a second.
+// `paused` is deliberately allowed, and it is the common case: a restore
+// leaves the replica paused, so a first choice that turns out to be wrong can
+// be followed by a second.
+//
+// And that allowance is exactly what ServedLive has to close. Shutting a
+// promoted copy down records `paused` too, so the state this page reaches by
+// undoing a failover is indistinguishable by role from the state it reaches by
+// doing a restore. One of them holds an old replica; the other may hold the
+// only copy of data that was serving live. The role cannot tell them apart and
+// the trace can, so the trace decides.
+//
+// Not permanent, which matters: the release command clears the trace, and
+// ReleaseCommand is what this page shows instead of the button. A predicate
+// that simply said no for ever would dead-end every pair that had ever failed
+// over.
 func (r FailoverRow) CanRestore() bool {
 	if r.AgentID == "" || r.Active || len(r.RestorePoints) == 0 {
+		return false
+	}
+	if r.ServedLive() {
 		return false
 	}
 	switch r.Role {
@@ -340,6 +395,80 @@ func (r FailoverRow) CanRestore() bool {
 		return false
 	}
 	return true
+}
+
+// ServedLive reports that THIS domain's disks have held data that was serving
+// live, and that nobody has released them.
+//
+// Presence of the record, not the parsed time: a value this console cannot read
+// still means the copy served. See LastPromotedAt.
+func (r FailoverRow) ServedLive() bool { return r.LastPromotedAt != "" }
+
+// PeerServedLive is the same question about the other end, and it is the one
+// the destructive sync controls have to ask -- they run on the source's row and
+// overwrite the peer.
+func (r FailoverRow) PeerServedLive() bool { return r.PeerLastPromotedAt != "" }
+
+// ServedLiveAt renders when this copy was promoted, for the explanation beside
+// the withheld controls. "an unrecorded time" when the record cannot be parsed,
+// which does not weaken what it means.
+func (r FailoverRow) ServedLiveAt() string {
+	return servedLiveAt(r.LastPromotedAtUnix)
+}
+
+// PeerServedLiveAt is the same for the peer.
+func (r FailoverRow) PeerServedLiveAt() string {
+	return servedLiveAt(r.PeerLastPromotedAtUnix)
+}
+
+func servedLiveAt(unix int64) string {
+	if unix <= 0 {
+		return "an unrecorded time"
+	}
+	return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04 UTC")
+}
+
+// ReleaseCommand is the command an operator must run, on the host holding the
+// copy, to release its promotion record.
+//
+// A COMMAND, printed for somebody to type, and not a button. That is the
+// design rather than an omission: every other guard in vmsync can be satisfied
+// by this console, and the one that protects a copy which served production is
+// the one that should not be. A button here would be a button an operator
+// under pressure presses for the same reason they pressed the last one, which
+// is how a single mis-aimed click became the failure this whole mechanism
+// exists to prevent. The engine refuses the flag on a running domain as well,
+// so there is no ordering by which this page can arrive at the destructive act
+// on its own.
+//
+// Rendered for the domain that actually carries the record, which for the sync
+// controls is the PEER and not this row -- getting that backwards would print a
+// command that does nothing and reports success.
+func (r FailoverRow) ReleaseCommand() string {
+	return releaseCommand(r.Hostname, r.VM)
+}
+
+// PeerReleaseCommand is the same command aimed at the peer.
+func (r FailoverRow) PeerReleaseCommand() string {
+	return releaseCommand(r.PeerHost, r.PeerVM)
+}
+
+func releaseCommand(host, vm string) string {
+	if vm == "" {
+		return ""
+	}
+	// qemu:///system with the host named in a trailing comment, rather than a
+	// qemu+ssh:// URI aimed from wherever the operator happens to be. The flag
+	// accepts a remote URI -- it is an ordinary metadata write, like
+	// -update-role, and is not restricted the way -promote is -- but the copy
+	// this releases is the one holding the data, and somebody about to declare
+	// that data disposable should be looking at the host it is on. A command
+	// that runs from anywhere invites running it against the wrong end.
+	cmd := "vmsync -target-uri qemu:///system -target-domain " + vm + " -release-promotion"
+	if host != "" {
+		cmd += "   # run this on " + host
+	}
+	return cmd
 }
 
 // CanReinit reports whether a one-shot full resync can be asked for.
@@ -351,8 +480,16 @@ func (r FailoverRow) CanRestore() bool {
 // This is the second half of going back to replicating after a restore. The
 // first is setting the replica's role back to `target`; without that this
 // would rebuild a replica the far end still refuses to accept.
+// Both variants are withheld while the PEER has served live and has not been
+// released. They are the two controls on this page that overwrite a replica
+// wholesale, they are offered from this row rather than from the peer's, and
+// force-clean additionally overrides the role interlock -- so before the trace
+// existed, the one button that could discard a copy which had served
+// production was on a row that said nothing at all about it. The engine now
+// refuses both, and withholding them here means the refusal arrives before
+// the click, with PeerReleaseCommand saying what to do about it.
 func (r FailoverRow) CanReinit() bool {
-	return r.AgentID != "" && r.IsSource
+	return r.AgentID != "" && r.IsSource && !r.PeerServedLive()
 }
 
 // CanForceClean reports whether the destructive variant of a full resync can
@@ -844,6 +981,12 @@ func BuildFailoverView(
 				PromotionMode:  dom.PromotionMode,
 				LastSyncUnix:   dom.LastSyncUnix,
 
+				// Raw and parsed both, carried rather than derived: only the
+				// agent on the host holding the disks can read it, and this
+				// console's job is to repeat it. See the fields themselves.
+				LastPromotedAt:     dom.LastPromotedAt,
+				LastPromotedAtUnix: dom.LastPromotedAtUnix,
+
 				// Carried straight from the report, because nothing here
 				// could work it out: the verdict lives on the replica's own
 				// domain metadata, and only its agent reads it.
@@ -886,6 +1029,8 @@ func BuildFailoverView(
 				row.PeerVerifyState = peer.VerifyState
 				row.PeerVerifyFailedAtUnix = peer.VerifyFailedAtUnix
 				row.PeerReplicaIncomplete = peer.ReplicaIncomplete
+				row.PeerLastPromotedAt = peer.LastPromotedAt
+				row.PeerLastPromotedAtUnix = peer.LastPromotedAtUnix
 			}
 
 			row.rank = rankRow(row)

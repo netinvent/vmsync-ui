@@ -488,6 +488,54 @@ the promotion — it would only hide it from the one place that explains what is
 wrong, while `vmsync -promote -force-promote` on the hypervisor stays exactly
 as available. The console reports and warns; the engine refuses.
 
+### A copy that has served live
+
+The one place this console does withdraw controls, and the reasoning is the
+mirror image of the paragraph above: these controls would be **refused by the
+engine**, so offering them can only produce a failed operation the operator had
+no way to predict.
+
+A VM that was failed over to carries `last_promoted_at`, and that field survives
+every role change — which matters because every route out of `promoted` rewrites
+the role. Shutting the copy down records `paused`. A fence records `fenced`.
+Either way the promotion record goes in the same write, and an hour later the row
+looks like an ordinary idle replica: same role, same checkpoint, same recent
+sync, same zero failure count. That is the state in which this console used to
+offer **Roll back** over it, and **Force clean resync** over it from the
+source's row, with nothing between the click and a full overwrite.
+
+So while the record is set, the row shows a **has served live** pill (only once
+the role has stopped saying `promoted` — while it still says so, the row already
+says it in the present tense) and a warning explaining what is refused, and:
+
+- **Roll back** is withheld;
+- **Full resync** and **Force clean resync** are withheld on the *source's* row,
+  with the warning shown there too — that is where they are fired from, and the
+  record is on the other end;
+- **Set role** stays available, but `target` is dropped from its menu. `source`
+  and `paused` destroy nothing, and `source` is how you *keep* this copy.
+
+The way out is printed, not offered:
+
+```
+vmsync -target-uri qemu:///system -target-domain web01 -release-promotion
+```
+
+There is deliberately no button for it, no operation kind, and no field on an
+operation that carries it. Everything else vmsync guards can be satisfied from
+this console; this is the one that asks for a person at a shell on the host
+holding the data. If the failover stands, **Invert** is the alternative that
+keeps the data — and it now works even after the copy has been shut down and
+demoted, because the same record is what tells vmsync that end really did serve.
+
+**Every action is also re-checked server-side when it is submitted.** The
+predicates that decide what a row offers are evaluated again, against state read
+at that moment, before an operation is created — so a tab left open across a
+failover, a back button, a re-submitted POST or a hand-made `curl` cannot issue
+an action the page would no longer draw. This does not make the console an
+enforcement point (the engine is still the only one); it makes the console stop
+promising things the engine will refuse.
+
 ### A replica left half-written by an interrupted rebuild
 
 A full copy into an existing target — `-reinit`, a force-clean, an ordinary

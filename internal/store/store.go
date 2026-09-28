@@ -300,6 +300,29 @@ type ReportDomain struct {
 	PromotedAtUnix int64  `json:"promoted_at_unix,omitempty"`
 	PromotedBy     string `json:"promoted_by,omitempty"`
 	PromotionMode  string `json:"promotion_mode,omitempty"`
+	// LastPromotedAt is the durable record that this domain HAS SERVED LIVE at
+	// least once, and is the only part of the promotion record above that
+	// survives the demotion. LastPromotedAtUnix is that value parsed.
+	//
+	// It is what makes this page's controls honest about a copy that was
+	// failed over to and then shut down. The four fields above are erased the
+	// instant the role changes, so such a copy reports role=paused, a recent
+	// sync, failure_count=0 and no promotion record -- identical, in this
+	// report, to a replica that has never done anything. Restore, Full resync
+	// and Force clean resync are all offered on that appearance, and vmsync
+	// refuses all three: without this field the refusal is the first thing
+	// that tells anybody, after the click.
+	//
+	// Raw AND parsed, for the reason ReplicaIncomplete is kept raw: presence
+	// is the finding, so a value this build cannot parse must still arrive as
+	// present rather than as a zero that reads "never promoted".
+	//
+	// UPGRADE ORDER: as with the two fields below, this must exist here before
+	// any agent that sends it is deployed. The report body is decoded with
+	// DisallowUnknownFields, so an agent upgraded first has its ENTIRE report
+	// rejected. Upgrade the UI, then the engines, then the agents.
+	LastPromotedAt     string `json:"last_promoted_at,omitempty"`
+	LastPromotedAtUnix int64  `json:"last_promoted_at_unix,omitempty"`
 	// LastReplicatedAtUnix / LastReplicatedTo are the SOURCE side of what
 	// LastSyncUnix records on a target -- the same fact from the other end,
 	// so the question survives losing one of the two hosts.
@@ -740,6 +763,16 @@ func Open(dir string) (*Store, error) {
 }
 
 func (s *Store) path(name string) string { return filepath.Join(s.dir, name) }
+
+// Dir is the directory every piece of this state lives under.
+//
+// Exported so something outside this package can say WHERE the state is -- a
+// diagnostic, an operator's question about what to back up, or a test that
+// needs to seed a file this package has no writer for. It is the directory
+// name and nothing else: no handle, no lock, and no way to reach the mutex
+// that makes the rest of this type safe, so a caller that writes through it is
+// racing every reader and must know it.
+func (s *Store) Dir() string { return s.dir }
 
 // --- agents ---------------------------------------------------------------
 

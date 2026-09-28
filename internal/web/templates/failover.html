@@ -67,6 +67,14 @@
                  and figure on this row stays exactly as it was. This is the
                  only mark that the disks changed underneath them. */}}
             {{if .ReplicaPartial}}<span class="pill s-crit">partial copy</span>{{end}}
+            {{/* Only once the role has stopped saying it. While a domain reads
+                 `promoted` the row already says so in the present tense, in the
+                 role cell and in the promoted-at line below; a second pill
+                 there would be noise on every failover. The pill earns its
+                 place in the state AFTER that -- shut down, recorded `paused`,
+                 promotion record erased -- which is the state where this is the
+                 only mark on the row that the disks hold live data. */}}
+            {{if and .ServedLive (ne .Role "promoted")}}<span class="pill s-warn">has served live</span>{{end}}
             {{if .Active}}<span class="pill s-ok">running</span>{{else}}<span class="pill s-none">stopped</span>{{end}}
             <div class="warnline">{{.Hostname}}</div>
             {{if .AgentStale}}<div class="warnline">agent stale — an action will not arrive until it checks in</div>{{end}}
@@ -90,6 +98,27 @@
                 <em>Force clean resync</em> is the one control that does go through, and it does not
                 clear the finding — it discards it without re-verifying, leaving the copy unproven
                 rather than known good, and nothing afterwards says it ever failed.
+              </div>
+            {{end}}
+            {{/* The counterpart of the pill above, and the same condition: only
+                 once the role has stopped saying it. This is the row's own
+                 explanation of a refusal an operator will otherwise meet as a
+                 bare error from three different controls. */}}
+            {{if and .ServedLive (ne .Role "promoted")}}
+              <div class="warnline">
+                <strong>HAS SERVED LIVE — these disks held production data.</strong>
+                {{.VM}} was promoted on {{.ServedLiveAt}} and has not been released, so what is on
+                these disks may be the only copy of the data that was serving then.
+                <strong>Nothing else on this row says so:</strong> a promotion record is erased the
+                moment the role changes, and shutting a promoted copy down records
+                <em>paused</em> — so the role, the checkpoint and the sync time all read like an
+                ordinary idle replica.
+                vmsync refuses to sync, restore or force-clean over it while this stands.
+                If the failover stands, <em>Invert</em> on the other end's row reverses the pair and
+                keeps this data; setting the role to <em>source</em> makes this copy the primary.
+                If it really is disposable, run this on {{.Hostname}} — it refuses while the domain
+                is running, and it is deliberately not a button here:
+                <code>{{.ReleaseCommand}}</code>
               </div>
             {{end}}
             {{if .ReplicaPartial}}
@@ -218,6 +247,28 @@
                     This console could not read the detail reported
                     (<code>{{.PeerReplicaIncomplete}}</code>), which does not change the warning.
                   {{end}}
+                </div>
+              {{end}}
+              {{/* The peer has served live and nobody has released it. Shown on
+                   THIS row for the same reason the partial-copy marker above
+                   is: Full resync and Force clean resync are both fired from
+                   here, and they are the two controls that would overwrite it.
+                   Without this the row that can discard a copy which held
+                   production data is the row that says nothing about it --
+                   the record lives on the peer, and the peer's own role was
+                   rewritten the moment it was shut down. */}}
+              {{if .PeerServedLive}}
+                <span class="pill s-crit">has served live</span>
+                <div class="warnline">
+                  this replica <strong>has served live</strong>: it was promoted on
+                  {{.PeerServedLiveAt}} and has not been released, so its disks may hold the only
+                  copy of the data that was serving then. Every other trace of that failover was
+                  erased when its role changed, which is why nothing else about it looks unusual.
+                  vmsync refuses a sync, a restore and a <em>force clean</em> over it, so
+                  <em>Full resync</em> is not offered below.
+                  If the failover stands, <em>Invert</em> reverses the pair and keeps this data.
+                  If it really is disposable, run this on the host holding it:
+                  <code>{{.PeerReleaseCommand}}</code>
                 </div>
               {{end}}
             {{else}}
@@ -366,6 +417,23 @@
             </form>
             {{end}}
 
+            {{/* Not "no restore points" and not silence: a row whose rollback
+                 is withheld because the copy served live needs to say so, and
+                 needs to say what clears it. The condition is checked against
+                 restore points existing so this does not appear on the many
+                 rows that simply have nothing to roll back to. */}}
+            {{if and .ServedLive .RestorePoints}}
+            <div class="warnline">
+              <strong>Roll back is not offered:</strong> {{.VM}} was promoted on {{.ServedLiveAt}}
+              and has not been released, so its disks may hold the only copy of the data that was
+              serving then — a rollback would overwrite it with an older replica. Every other trace
+              of that failover went when its role changed, which is why the rest of this row looks
+              ordinary. If the failover stands, <em>Invert</em> keeps this data. If it really is
+              disposable, run this on {{.Hostname}}:
+              <code>{{.ReleaseCommand}}</code>
+            </div>
+            {{end}}
+
             {{if .CanRestore}}
             <details class="act">
               <summary>Roll back…</summary>
@@ -490,12 +558,32 @@
                 <label class="cell">
                   <span>role</span>
                   <select name="role">
+                    {{/* `target` is the one value here that hands the domain
+                         back to the replication machinery, after which the
+                         next scheduled sync overwrites it unattended. It is
+                         withheld from a copy that has served live and not been
+                         released -- the engine refuses it too, and leaving it
+                         in the menu would only mean an operator discovers that
+                         by choosing it. `source` and `paused` stay: they
+                         destroy nothing, and the escape hatch must not close. */}}
+                    {{if .CanSetRoleTarget}}
                     <option value="target">target — a normal replica again</option>
+                    {{end}}
                     <option value="source">source — the primary of its pair</option>
                     <option value="paused">paused — replication suspended</option>
                   </select>
                 </label>
                 <button>Set role</button>
+                {{if not .CanSetRoleTarget}}
+                <div class="warnline">
+                  <strong><em>target</em> is not offered:</strong> {{.VM}} was promoted on
+                  {{.ServedLiveAt}} and has not been released. Making it a replication target again
+                  would arm the next scheduled sync to overwrite data that was serving live, and
+                  vmsync refuses it. <em>source</em> makes this copy the primary and keeps the data;
+                  if it really is disposable, run this on {{.Hostname}}:
+                  <code>{{.ReleaseCommand}}</code>
+                </div>
+                {{end}}
                 <div class="note">
                   The way back. A VM a fence stopped is <em>paused</em>: set it to
                   <em>target</em> to let it receive again, or <em>source</em> to make it primary.

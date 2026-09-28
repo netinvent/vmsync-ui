@@ -548,3 +548,71 @@ func entryFor(t *testing.T, s *Store, agent, vm string) ScheduleEntry {
 	t.Fatalf("no entry for %s", vm)
 	return ScheduleEntry{}
 }
+
+// TestACopyThatServedLiveDecodesFromTheAgentsWireFormat is the decode side of
+// the contract cmd/vmsync-agent/client_test.go pins from the sending side.
+//
+// DisallowUnknownFields makes this a whole-report failure, not a missing field:
+// an agent that sends a key this build does not know has its ENTIRE report
+// rejected -- domains, roles, sync results and all -- which in production looks
+// like every upgraded host going offline at once. So the keys have to match
+// exactly, and the UI has to be upgraded before the agents.
+//
+// The fixture is the state the field exists for: promoted, then shut down. The
+// role reads `paused`, the promotion record is gone, the checkpoint and sync
+// time are recent, failure_count is zero and the status is `paused` -- every
+// field here says ordinary idle replica, and one says these disks held
+// production data an hour ago.
+func TestACopyThatServedLiveDecodesFromTheAgentsWireFormat(t *testing.T) {
+	const raw = "1758441500"
+	const body = `{
+	  "name": "web01",
+	  "active": false,
+	  "role": "paused",
+	  "replica_source": "hyper01p:web01",
+	  "failure_count": 0,
+	  "last_checkpoint": "vmsync-1758441000",
+	  "last_sync_unix": 1758441000,
+	  "last_promoted_at": "` + raw + `",
+	  "last_promoted_at_unix": 1758441500,
+	  "status": "paused",
+	  "age_seconds": 120
+	}`
+
+	var d ReportDomain
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&d); err != nil {
+		t.Fatalf("decode: %v -- a name that does not match the agent's rejects the whole report", err)
+	}
+	if d.LastPromotedAt != raw {
+		t.Errorf("LastPromotedAt = %q, want %q verbatim -- presence is the finding, so a record this "+
+			"build cannot parse must still arrive as present rather than as a zero that reads "+
+			"'never promoted'", d.LastPromotedAt, raw)
+	}
+	if d.LastPromotedAtUnix != 1758441500 {
+		t.Errorf("LastPromotedAtUnix = %d, want 1758441500", d.LastPromotedAtUnix)
+	}
+	// The trap, exactly as with replica_incomplete: everything beside it reads
+	// healthy, because the promotion record was erased when the role changed.
+	if d.FailureCount != 0 || d.Role != RolePaused || d.LastCheckpoint == "" {
+		t.Errorf("the fixture no longer models the case that matters -- a copy that served live and "+
+			"looks like an ordinary paused replica by every other measure: %+v", d)
+	}
+}
+
+// The other half. Both keys are omitempty, so every replica in an estate that
+// has never been failed over arrives without them, and a zero that read as
+// "served live" would put the warning on every row -- which is the same as
+// putting it on none, and would withhold Roll back and Force clean resync
+// across the whole fleet.
+func TestADomainThatNeverServedLiveCarriesNoRecord(t *testing.T) {
+	var d ReportDomain
+	if err := json.Unmarshal([]byte(`{"name":"web01","active":true,"failure_count":0,"status":"ok","age_seconds":30}`), &d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.LastPromotedAt != "" || d.LastPromotedAtUnix != 0 {
+		t.Errorf("a domain that was never promoted decoded to LastPromotedAt:%q/%d, want empty",
+			d.LastPromotedAt, d.LastPromotedAtUnix)
+	}
+}

@@ -18,9 +18,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -164,6 +167,48 @@ func failoverOperationFixture() []store.OperationRecord {
 			CreatedAtUnix: now.Unix() - 3000, CreatedBy: "op"}, AgentID: "src",
 			CancelledAtUnix: now.Unix() - 2900, CancelledBy: "op"},
 	}
+}
+
+// seedFailoverFleet makes failoverFixture's fleet real in the store: the
+// agents enrolled, their reports saved.
+//
+// Every test that POSTs to /failover/operation needs it, because the endpoint
+// re-checks eligibility against the fleet it can currently see rather than
+// trusting the form. Before that check, these tests could issue a promotion of
+// a VM no agent had ever mentioned, on an agent that did not exist -- which is
+// exactly the gap the check closes, so the fixture has to become honest for
+// them to keep asserting what they are about.
+//
+// agents.json is written directly because this package has no writer for it:
+// Enrol mints its own random ID from a one-shot token, so it cannot produce the
+// fixture's "src" and "dr", and the reports map is keyed by those. SaveReport
+// afterwards, not before -- it rewrites agents.json from what it finds, so a
+// report saved for an agent that is not there yet records nothing.
+func seedFailoverFleet(t *testing.T, s *Server) ([]store.Agent, map[string]store.Report) {
+	t.Helper()
+	agents, reports := failoverFixture()
+
+	blob, err := json.Marshal(agents)
+	if err != nil {
+		t.Fatalf("marshal agents: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Store.Dir(), "agents.json"), blob, 0o600); err != nil {
+		t.Fatalf("seed agents: %v", err)
+	}
+	for _, a := range agents {
+		if err := s.Store.SaveReport(a.ID, reports[a.ID]); err != nil {
+			t.Fatalf("save report for %s: %v", a.ID, err)
+		}
+	}
+	// Proof the seeding worked, rather than a test that passes because
+	// everything was refused for the wrong reason. A silently empty fleet
+	// would make every assertion below read "nothing was published", which is
+	// also what a real bug looks like.
+	got, err := s.Store.Agents()
+	if err != nil || len(got) != len(agents) {
+		t.Fatalf("seeded fleet reads back as %d agents (%v), want %d", len(got), err, len(agents))
+	}
+	return agents, reports
 }
 
 func rowFor(t *testing.T, v FailoverView, host, vm string) FailoverRow {
@@ -1341,12 +1386,7 @@ func TestAPromotedRowShowsWhetherItArmedAFence(t *testing.T) {
 // of the endpoint the agent polls, addressed to the right agent.
 func TestPromoteReachesTheAgentConfig(t *testing.T) {
 	s := testServer(t)
-	agents, reports := failoverFixture()
-	for _, a := range agents {
-		if err := s.Store.SaveReport(a.ID, reports[a.ID]); err != nil {
-			t.Fatalf("save report: %v", err)
-		}
-	}
+	seedFailoverFleet(t, s)
 
 	rec := post(t, s, "/failover/operation", url.Values{
 		"kind":      {"promote"},
@@ -1411,6 +1451,7 @@ func TestPromoteReachesTheAgentConfig(t *testing.T) {
 // is why this asserts on the AGENT's copy rather than on the store's.
 func TestAnIssuedOperationReachesTheAgentCarryingItsAuditID(t *testing.T) {
 	s := testServer(t)
+	seedFailoverFleet(t, s)
 	if rec := post(t, s, "/failover/operation", url.Values{
 		"kind": {"reinit"}, "agent_id": {"src"}, "vm": {"db01"},
 	}); rec.Code != 303 {
@@ -1456,6 +1497,7 @@ func TestAnIssuedOperationReachesTheAgentCarryingItsAuditID(t *testing.T) {
 // was rehearsing for.
 func TestPromoteWithoutTheFenceCheckboxArmsNothing(t *testing.T) {
 	s := testServer(t)
+	seedFailoverFleet(t, s)
 	rec := post(t, s, "/failover/operation", url.Values{
 		"kind": {"promote"}, "agent_id": {"dr"}, "vm": {"db01"}, "mode": {"planned"},
 	})
@@ -1478,6 +1520,7 @@ func TestPromoteWithoutTheFenceCheckboxArmsNothing(t *testing.T) {
 // promotion having verified none of its preconditions.
 func TestSetRoleRefusesToWritePromotedByHand(t *testing.T) {
 	s := testServer(t)
+	seedFailoverFleet(t, s)
 	rec := post(t, s, "/failover/operation", url.Values{
 		"kind": {"set-role"}, "agent_id": {"dr"}, "vm": {"db01"}, "role": {"promoted"},
 	})
@@ -1498,6 +1541,7 @@ func TestSetRoleRefusesToWritePromotedByHand(t *testing.T) {
 
 func TestSetRoleAcceptsTheWayBackFromAFence(t *testing.T) {
 	s := testServer(t)
+	seedFailoverFleet(t, s)
 	rec := post(t, s, "/failover/operation", url.Values{
 		"kind": {"set-role"}, "agent_id": {"src"}, "vm": {"mail01"}, "role": {"target"},
 	})
@@ -1517,6 +1561,7 @@ func TestSetRoleAcceptsTheWayBackFromAFence(t *testing.T) {
 // operator should be able to create by clicking twice on a slow page.
 func TestASecondOperationOnTheSameVMIsRefused(t *testing.T) {
 	s := testServer(t)
+	seedFailoverFleet(t, s)
 	first := post(t, s, "/failover/operation", url.Values{
 		"kind": {"promote"}, "agent_id": {"dr"}, "vm": {"db01"}, "mode": {"forced"},
 	})
@@ -1542,6 +1587,7 @@ func TestASecondOperationOnTheSameVMIsRefused(t *testing.T) {
 // 15-minute deadline for.
 func TestCancelStopsAnOperationBeingPublished(t *testing.T) {
 	s := testServer(t)
+	seedFailoverFleet(t, s)
 	if rec := post(t, s, "/failover/operation", url.Values{
 		"kind": {"promote"}, "agent_id": {"dr"}, "vm": {"db01"}, "mode": {"forced"},
 	}); rec.Code != 303 {
@@ -1579,6 +1625,7 @@ func TestCancelStopsAnOperationBeingPublished(t *testing.T) {
 func TestAShutdownCarriesTheResolvedTimeout(t *testing.T) {
 	t.Run("the VM's own override", func(t *testing.T) {
 		s := testServer(t)
+		seedFailoverFleet(t, s)
 		set, _ := s.Store.Settings()
 		set.ShutdownTimeoutSec = 300
 		if err := s.Store.SetSettings(set); err != nil {
@@ -1610,14 +1657,21 @@ func TestAShutdownCarriesTheResolvedTimeout(t *testing.T) {
 
 	t.Run("the estate default when the VM has none", func(t *testing.T) {
 		s := testServer(t)
+		seedFailoverFleet(t, s)
 		set, _ := s.Store.Settings()
 		set.ShutdownTimeoutSec = 600
 		if err := s.Store.SetSettings(set); err != nil {
 			t.Fatalf("SetSettings: %v", err)
 		}
 
+		// app01: a real, running source with no schedule entry of its own,
+		// which is what makes the estate default the answer. It used to be a
+		// name no agent had ever reported, and that stopped working once the
+		// endpoint began re-checking the row -- rightly, since an operation
+		// against a VM the control plane cannot see is not something a form
+		// field should be able to create.
 		if rec := post(t, s, "/failover/operation", url.Values{
-			"kind": {"shutdown-domain"}, "agent_id": {"src"}, "vm": {"nowhere01"},
+			"kind": {"shutdown-domain"}, "agent_id": {"src"}, "vm": {"app01"},
 		}); rec.Code != 303 {
 			t.Fatalf("status = %d", rec.Code)
 		}
@@ -1633,6 +1687,7 @@ func TestAShutdownCarriesTheResolvedTimeout(t *testing.T) {
 
 	t.Run("never zero, which the agent would read as no opinion", func(t *testing.T) {
 		s := testServer(t)
+		seedFailoverFleet(t, s)
 		if rec := post(t, s, "/failover/operation", url.Values{
 			"kind": {"shutdown-domain"}, "agent_id": {"src"}, "vm": {"db01"},
 		}); rec.Code != 303 {
@@ -1752,6 +1807,7 @@ func TestFailoverActionsRefuseTheUngated(t *testing.T) {
 
 func TestEveryIssuedOperationIsAudited(t *testing.T) {
 	s := testServer(t)
+	seedFailoverFleet(t, s)
 	if rec := post(t, s, "/failover/operation", url.Values{
 		"kind": {"promote"}, "agent_id": {"dr"}, "vm": {"db01"}, "mode": {"forced"}, "arm_fence": {"on"},
 	}); rec.Code != 303 {
@@ -1883,4 +1939,141 @@ func renderFailoverRowHTML(t *testing.T, r FailoverRow) string {
 		t.Fatalf("render: %v", err)
 	}
 	return buf.String()
+}
+
+// --- the server-side re-check --------------------------------------------
+
+// TestAStaleTabCannotIssueAnOperationThePageWouldNoLongerOffer is the whole of
+// CI-36 in one scenario.
+//
+// Every control on this page was decided by a predicate at render time, and
+// then nothing consulted those predicates again. The form carried an agent id,
+// a VM name and a kind, and the endpoint validated only their SHAPE. So the
+// buttons were advisory: a tab left open, a back button, a re-submitted POST or
+// a hand-written curl reached the operation queue with no state check between
+// it and the agent.
+//
+// The window is exactly as long as somebody leaves the page open, and the
+// states this page exists for change underneath it by design. Here: "Force
+// clean resync" is drawn while hyper02p:db01 is an ordinary replica, and
+// submitted after that replica has been failed over to and is serving live.
+// Force-clean overrides the role interlock, so nothing downstream would have
+// stopped it either.
+func TestAStaleTabCannotIssueAnOperationThePageWouldNoLongerOffer(t *testing.T) {
+	s := testServer(t)
+	_, reports := seedFailoverFleet(t, s)
+
+	// The form as the page drew it, while db01's replica was a plain replica.
+	stale := url.Values{"kind": {"force-clean"}, "agent_id": {"src"}, "vm": {"db01"}}
+
+	// Now the world moves: the replica is promoted and running.
+	dr := reports["dr"]
+	for i := range dr.Domains {
+		if dr.Domains[i].Name == "db01" {
+			dr.Domains[i].Role = store.RolePromoted
+			dr.Domains[i].Active = true
+			dr.Domains[i].PromotedFrom = "hyper01p:db01"
+			dr.Domains[i].PromotedAtUnix = now.Unix() - 60
+			dr.Domains[i].LastPromotedAt = strconv.FormatInt(now.Unix()-60, 10)
+			dr.Domains[i].LastPromotedAtUnix = now.Unix() - 60
+		}
+	}
+	if err := s.Store.SaveReport("dr", dr); err != nil {
+		t.Fatalf("save report: %v", err)
+	}
+
+	rec := post(t, s, "/failover/operation", stale)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want a redirect carrying the refusal", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "error=") {
+		t.Fatalf("the stale submission was ACCEPTED (%q) -- a force-clean over a copy that is "+
+			"serving live is exactly what this re-check exists to stop", loc)
+	}
+	// The refusal has to be actionable, not just a refusal: it must name the
+	// peer that carries the record and the command that releases it.
+	if !strings.Contains(loc, "release-promotion") {
+		t.Errorf("the refusal does not say what clears it: %q", loc)
+	}
+	if ops, err := s.Store.Operations(); err != nil || len(ops) != 0 {
+		t.Errorf("%d operations were created by a submission the page would no longer offer", len(ops))
+	}
+	// And nothing reached the agent, which is the only thing that actually
+	// matters -- an operation recorded and not published is merely untidy.
+	cfg, _, err := s.Store.AgentConfigFor("src")
+	if err != nil {
+		t.Fatalf("agent config: %v", err)
+	}
+	if len(cfg.Operations) != 0 {
+		t.Errorf("the source agent was published %d operations", len(cfg.Operations))
+	}
+}
+
+// TestTheReCheckRefusesAVMNoAgentReports: the endpoint used to accept any VM
+// name at all. Several tests in this file relied on that, which is how it went
+// unnoticed -- they issued promotions of domains no report had ever mentioned
+// and asserted the plumbing worked.
+func TestTheReCheckRefusesAVMNoAgentReports(t *testing.T) {
+	s := testServer(t)
+	seedFailoverFleet(t, s)
+
+	rec := post(t, s, "/failover/operation", url.Values{
+		"kind": {"promote"}, "agent_id": {"dr"}, "vm": {"nowhere01"}, "mode": {"forced"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=") {
+		t.Fatalf("a promotion of a VM the control plane has never seen was accepted: %q", loc)
+	}
+	if ops, err := s.Store.Operations(); err != nil || len(ops) != 0 {
+		t.Errorf("%d operations created for a VM no agent reports", len(ops))
+	}
+}
+
+// TestSetRoleToTargetIsRefusedOnACopyThatServedLive: `target` is the value that
+// re-arms the schedule, so it is the one the trace has to stop. The refusal must
+// also say that `source` and `paused` are still available -- an operator told
+// only "no" concludes the console has locked them out of their own estate.
+func TestSetRoleToTargetIsRefusedOnACopyThatServedLive(t *testing.T) {
+	s := testServer(t)
+	_, reports := seedFailoverFleet(t, s)
+
+	// app01 on hyper02p was promoted and never started. Shut down and demoted
+	// to paused, it keeps only the trace -- the state the console's own advice
+	// produces.
+	dr := reports["dr"]
+	for i := range dr.Domains {
+		if dr.Domains[i].Name == "app01" {
+			dr.Domains[i].Role = store.RolePaused
+			dr.Domains[i].Active = false
+			dr.Domains[i].PromotedFrom = ""
+			dr.Domains[i].PromotedAtUnix = 0
+			dr.Domains[i].LastPromotedAt = strconv.FormatInt(now.Unix()-120, 10)
+			dr.Domains[i].LastPromotedAtUnix = now.Unix() - 120
+		}
+	}
+	if err := s.Store.SaveReport("dr", dr); err != nil {
+		t.Fatalf("save report: %v", err)
+	}
+
+	rec := post(t, s, "/failover/operation", url.Values{
+		"kind": {"set-role"}, "agent_id": {"dr"}, "vm": {"app01"}, "role": {"target"},
+	})
+	loc := rec.Header().Get("Location")
+	if rec.Code != http.StatusSeeOther || !strings.Contains(loc, "error=") {
+		t.Fatalf("set-role=target on a copy that served live was accepted: %d %q", rec.Code, loc)
+	}
+	if !strings.Contains(loc, "release-promotion") {
+		t.Errorf("the refusal does not name the command that clears it: %q", loc)
+	}
+
+	// paused is still settable, because the escape hatch must not close.
+	if rec := post(t, s, "/failover/operation", url.Values{
+		"kind": {"set-role"}, "agent_id": {"dr"}, "vm": {"app01"}, "role": {"paused"},
+	}); rec.Code != http.StatusSeeOther || strings.Contains(rec.Header().Get("Location"), "error=") {
+		t.Errorf("setting a harmless role was refused too, which locks the operator out: %q",
+			rec.Header().Get("Location"))
+	}
 }

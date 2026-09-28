@@ -245,3 +245,100 @@ func TestContentsAsOfIsEmptyWhenNothingIsKnown(t *testing.T) {
 		t.Errorf("ContentsAsOf = %q for a domain that never synced, want empty", got)
 	}
 }
+
+// --- a copy that has served live -----------------------------------------
+
+// TestARestoreIsWithheldFromACopyThatServedLive is the hole in TestCanRestore
+// above, and the reason it was not visible there: every refusal in that matrix
+// is keyed on the ROLE, and the role is rewritten by the very act that leads an
+// operator here.
+//
+// "was failed over to" is refused because Role is `promoted`. But a promoted
+// copy is shut down before anything else is done with it, and a clean shutdown
+// records `paused` -- which the test two functions down asserts must stay
+// restorable, because for an ordinary replica it must. So the sequence the
+// console itself recommends turns the strongest refusal in that matrix into the
+// allowance beside it, in one operation, with nothing in between.
+//
+// The trace is what tells the two paused domains apart.
+func TestARestoreIsWithheldFromACopyThatServedLive(t *testing.T) {
+	row := restorableRow()
+	row.Role = store.RolePaused
+	row.LastPromotedAt = "1756000000"
+	row.LastPromotedAtUnix = 1756000000
+
+	if row.CanRestore() {
+		t.Fatal("a paused copy that was promoted and then shut down is offered a rollback that " +
+			"would overwrite the data it served; the role cannot tell it from an ordinary paused replica")
+	}
+	if !row.ServedLive() {
+		t.Error("ServedLive must read the record, since it is the only thing left saying this copy served")
+	}
+	// Withheld, not dead-ended: the operator has to be told what clears it,
+	// and the command has to name this domain.
+	if cmd := row.ReleaseCommand(); !strings.Contains(cmd, "-release-promotion") || !strings.Contains(cmd, row.VM) {
+		t.Errorf("ReleaseCommand() = %q, want the command that releases THIS domain", cmd)
+	}
+	// And released, it goes back to being an ordinary paused replica. A
+	// predicate that refused for ever would leave every pair that had once
+	// failed over unable to use this page again.
+	row.LastPromotedAt, row.LastPromotedAtUnix = "", 0
+	if !row.CanRestore() {
+		t.Error("after the record is released the rollback must be offered again; withholding it " +
+			"permanently dead-ends every pair that has ever been failed over")
+	}
+}
+
+// TestAResyncIsWithheldWhenThePEERServedLive: the destructive sync controls are
+// offered on the SOURCE's row, so the row that can overwrite a copy which held
+// production data is not the row the record is on. Reading the local trace here
+// would protect nothing at all.
+func TestAResyncIsWithheldWhenThePEERServedLive(t *testing.T) {
+	src := FailoverRow{AgentID: "src", VM: "web01", IsSource: true,
+		PeerHost: "hyper02p", PeerVM: "web01",
+		PeerLastPromotedAt: "1756000000", PeerLastPromotedAtUnix: 1756000000}
+
+	if src.CanReinit() {
+		t.Error("a full resync is offered into a replica that has served live and not been released")
+	}
+	if src.CanForceClean() {
+		t.Error("force-clean is offered over a replica that has served live -- it is the one control " +
+			"that also overrides the role interlock, so it is the worst one to leave open")
+	}
+	if cmd := src.PeerReleaseCommand(); !strings.Contains(cmd, "-release-promotion") || !strings.Contains(cmd, "hyper02p") {
+		t.Errorf("PeerReleaseCommand() = %q, want the command aimed at the PEER and naming its host", cmd)
+	}
+	// The local trace must not be what gates these: a source that was itself
+	// promoted in an earlier cycle is the normal post-inversion state, and its
+	// own history says nothing about the replica it writes to.
+	src.PeerLastPromotedAt, src.PeerLastPromotedAtUnix = "", 0
+	src.LastPromotedAt, src.LastPromotedAtUnix = "1600000000", 1600000000
+	if !src.CanReinit() {
+		t.Error("a source that was itself promoted in an earlier cycle cannot resync its replica; " +
+			"the gate is reading the wrong end")
+	}
+}
+
+// TestOnlyTargetIsWithheldFromTheRoleMenu: the escape hatch must not close.
+// `target` is the one value that hands the domain back to the replication
+// machinery, after which the next scheduled sync overwrites it unattended.
+// `source` and `paused` destroy nothing and stay available -- and `source` is
+// how an operator keeps this copy, which is the whole alternative the refusal
+// points at.
+func TestOnlyTargetIsWithheldFromTheRoleMenu(t *testing.T) {
+	row := restorableRow()
+	row.Role = store.RolePaused
+	row.LastPromotedAt = "1756000000"
+
+	if !row.CanSetRole() {
+		t.Fatal("the role control is withheld entirely, which closes the only way back from this state")
+	}
+	if row.CanSetRoleTarget() {
+		t.Error("`target` is offered on a copy that served live; the next scheduled sync would then " +
+			"overwrite it with no further click")
+	}
+	row.LastPromotedAt = ""
+	if !row.CanSetRoleTarget() {
+		t.Error("`target` stays withheld after the record is released")
+	}
+}

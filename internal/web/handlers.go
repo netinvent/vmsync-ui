@@ -687,6 +687,34 @@ func (s *Server) postFailoverOperation(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
+	// The eligibility re-check, against state read NOW rather than against
+	// what the form says.
+	//
+	// Everything above validates the SHAPE of the request -- a mode is one of
+	// two words, a restore names a tag some report has heard of. Nothing above
+	// asks the question the page itself asked before drawing the button: is
+	// this operation allowed on this domain in its current state. The
+	// predicates decided that at render time and then nothing consulted them
+	// again, so every control on the page was effectively advisory: a stale
+	// tab, a back button, a re-submitted POST or a hand-made curl reached the
+	// operation queue with no state check between it and the agent.
+	//
+	// That is not a theoretical hole. The window is exactly as long as
+	// somebody leaves the page open, and the states this page is for change
+	// underneath it by design -- a peer gets promoted, a fence fires, a
+	// restore leaves a replica paused. "Force clean resync" drawn while a
+	// target was an ordinary replica still submits after that target has been
+	// failed over to and is serving live.
+	//
+	// Re-evaluated through the SAME predicates the template renders from, not
+	// a second copy of the rules: a re-check that could disagree with the page
+	// is a re-check that will, and the disagreement would show up as a button
+	// that is offered and always refused, or worse, the reverse.
+	if err := s.refuseIneligible(agentID, op); err != nil {
+		s.redirectFailover(w, r, "", err.Error())
+		return
+	}
+
 	// Intent first, outcome after -- the same order the store uses for the
 	// operation itself, and for the same reason: a half-completed failover
 	// is precisely the case that most needs attribution.
@@ -709,6 +737,99 @@ func (s *Server) postFailoverOperation(w http.ResponseWriter, r *http.Request, u
 	s.redirectFailover(w, r, fmt.Sprintf(
 		"Issued: %s on %s. The agent picks it up on its next poll, usually within seconds; it expires in %d minutes if nothing collects it.",
 		kind, vm, int(store.OperationTTL.Minutes())), "")
+}
+
+// refuseIneligible re-asks, from state read now, the question the page asked
+// before it drew the button. It returns nil when the operation is still
+// offerable, and an error worded for the operator when it is not.
+//
+// It rebuilds the row through BuildFailoverView -- the whole view, from the
+// whole fleet -- rather than looking up one domain. That is deliberate and it
+// is not laziness: half of what decides eligibility is not in this domain's own
+// report at all. Whether a peer has been promoted, whether a peer carries a
+// verification failure or a durable promotion record, whether an enrolled agent
+// exists for the peer's host: every one of those comes from ANOTHER host's
+// report, and a per-domain check would quietly answer "no objection" to exactly
+// the cross-host conditions this page exists for.
+//
+// A row that has vanished refuses too. It means the domain is no longer in any
+// live agent's report, or no longer part of a pair -- and issuing a failover
+// operation against a domain the control plane cannot currently see is not
+// something to do on the strength of a form field.
+func (s *Server) refuseIneligible(agentID string, op store.Operation) error {
+	vm, kind := op.VM, op.Kind
+	agents, reports, err := s.loadFleet()
+	if err != nil {
+		return fmt.Errorf("could not re-read the fleet's state to confirm this is still possible; nothing was issued: %w", err)
+	}
+	ops, err := s.Store.Operations()
+	if err != nil {
+		return fmt.Errorf("could not re-read outstanding operations to confirm this is still possible; nothing was issued: %w", err)
+	}
+	view := BuildFailoverView(agents, reports, ops, time.Now())
+
+	var row FailoverRow
+	found := false
+	for _, r := range view.Rows {
+		if r.AgentID == agentID && strings.EqualFold(r.VM, vm) {
+			row, found = r, true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("%s is not in the current view of the fleet — its agent may have stopped reporting, or it may no longer be part of a replication pair. Reload this page before acting on it", vm)
+	}
+
+	// The predicates themselves, one per kind, so this cannot drift from what
+	// the template offered. A kind with no entry is a programming error rather
+	// than an open door: the default below refuses.
+	var ok bool
+	switch kind {
+	case store.OpPromote:
+		ok = row.CanPromote()
+	case store.OpInvert:
+		ok = row.CanInvert()
+	case store.OpShutdown:
+		ok = row.CanShutdown()
+	case store.OpSetRole:
+		// Two questions, not one. The control stays available in every state
+		// -- it is the escape hatch, and `source` and `paused` destroy nothing
+		// -- but `target` is the value that hands a domain back to the
+		// replication machinery, after which the next scheduled sync overwrites
+		// it unattended. That one is withheld from a copy that served live.
+		ok = row.CanSetRole() && (op.Mode != store.RoleTarget || row.CanSetRoleTarget())
+	case store.OpRestore:
+		ok = row.CanRestore()
+	case store.OpReinit:
+		ok = row.CanReinit()
+	case store.OpForceClean:
+		ok = row.CanForceClean()
+	default:
+		return fmt.Errorf("unknown operation kind %q", kind)
+	}
+	if ok {
+		return nil
+	}
+
+	// The reasons worth naming, most specific first, because "no longer
+	// possible" alone sends somebody hunting. The two promotion traces get
+	// their own wording and their own command: they are the only refusals here
+	// that a reload will not clear, and an operator who is not told that will
+	// reload until they conclude the console is broken.
+	switch {
+	case kind == store.OpSetRole && op.Mode == store.RoleTarget && row.ServedLive():
+		return fmt.Errorf("%s was promoted at %s and has not been released, so making it a replication target again would arm the next scheduled sync to overwrite data that was serving live — vmsync refuses it. `source` and `paused` are still available here. If the failover stands, reverse the pair with Invert. If the data really is disposable, run:  %s",
+			vm, row.ServedLiveAt(), row.ReleaseCommand())
+	case (kind == store.OpRestore) && row.ServedLive():
+		return fmt.Errorf("%s was promoted at %s and has not been released, so its disks may hold the only copy of the data that was serving then — vmsync refuses to restore over it. If the failover stands, reverse the pair with Invert, which keeps this data. If the data really is disposable, run:  %s",
+			vm, row.ServedLiveAt(), row.ReleaseCommand())
+	case (kind == store.OpReinit || kind == store.OpForceClean) && row.PeerServedLive():
+		return fmt.Errorf("%s:%s was promoted at %s and has not been released, so a full resync into it would overwrite data that was serving live — vmsync refuses it, force-clean included. If the failover stands, reverse the pair with Invert. If the data really is disposable, run:  %s",
+			row.PeerHost, row.PeerVM, row.PeerServedLiveAt(), row.PeerReleaseCommand())
+	case row.AgentID == "":
+		return fmt.Errorf("no enrolled agent reports for %s's host any more, so nothing can carry this out", vm)
+	}
+	return fmt.Errorf("%s is no longer possible on %s: its state changed after this page was drawn. Reload and look at the row again before acting", kind, vm)
 }
 
 // restorePointKnown reports whether an agent's latest report lists this tag
