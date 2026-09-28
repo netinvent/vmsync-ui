@@ -137,9 +137,17 @@
                 armed a fence against {{.ArmedFenceSource}}{{if .ArmedFenceAt}} at {{.ArmedFenceAt}}{{end}}{{if .ArmedFenceArmedBy}} by {{.ArmedFenceArmedBy}}{{end}}
               </div>
             {{end}}
+            {{if .FenceFailed}}
+              <div class="warnline">
+                <strong>fenced but still running</strong> — a fence suspended this domain's replication and did not stop the domain,
+                so it is live beside the copy that was promoted over it and both are taking writes.
+                A fence is never retried automatically. Stop this domain by hand, then
+                <em>invert</em> if the failover stands, or set its role back to <em>source</em> if the fence was wrong.
+              </div>
+            {{end}}
             {{with .Fenced}}
               <div class="warnline">
-                {{if eq .State "done"}}
+                {{if and (eq .State "done") (not $r.FenceFailed)}}
                   stopped by vmsync{{if $r.FencedAt}} at {{$r.FencedAt}}{{end}} — {{.PeerRef}} was promoted{{if .ArmedBy}} by {{.ArmedBy}}{{end}}.
                   This is not an administrative pause.
                 {{else}}

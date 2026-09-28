@@ -195,6 +195,22 @@ func (r FailoverRow) WasFenced() bool {
 // was then handled by somebody shutting the VM down would otherwise still be
 // shouting in December, about a situation that no longer exists.
 func (r FailoverRow) FenceFailed() bool {
+	// The ROLE first, and on its own. replication_role=fenced is written by a
+	// fence whether or not the shutdown took, and it lives on the domain -- so it
+	// survives losing the agent's state_dir, a fence run by hand with
+	// `vmsync -fence-domain` (which writes no ledger entry at all), a ledger
+	// write that failed while the fence proceeded, and a ledger that says the
+	// fence finished before somebody started the domain again. Keying only on
+	// the ledger, as this did, reported every one of those as healthy.
+	//
+	// Same rule the agent's fence sweep and its vmsync_agent_fenced_running gauge
+	// use, so the console and the metrics cannot disagree about which VMs are
+	// live in two places.
+	if r.Role == store.RoleFenced && r.Active {
+		return true
+	}
+	// And the ledger as well, which still catches one case the role cannot: a
+	// fence that failed BEFORE it got as far as writing the role.
 	return r.Active && r.Fenced != nil && r.Fenced.State != store.OpStateDone
 }
 

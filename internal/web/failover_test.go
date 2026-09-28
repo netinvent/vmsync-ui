@@ -1777,3 +1777,110 @@ func TestEveryIssuedOperationIsAudited(t *testing.T) {
 		t.Error("issuing a promotion must leave an audit entry")
 	}
 }
+
+// The ROLE is the witness a failed fence is recognised by, and it has to work
+// with no ledger entry at all.
+//
+// This is the case CI-07 was about, at the console end of it. Keying the alarm on
+// the fence ledger — as this page did — reports a domain as healthy in every
+// situation where the ledger is absent or stale but the role is not:
+//
+//   - the fence was run by hand with `vmsync -fence-domain`, which writes the
+//     role and no ledger entry whatsoever;
+//   - the agent's state_dir was lost or reset, so fences.json is empty while the
+//     domain still carries the role a previous agent wrote;
+//   - the ledger write itself failed and the fence proceeded anyway (the agent
+//     counts that as fenceUnrecorded and considers a split brain the worse
+//     outcome, so it does NOT abort);
+//   - the ledger says the fence FINISHED, and then the domain was started again —
+//     by hand, or by a host reboot, since nothing clears a fenced domain's
+//     autostart flag.
+//
+// In every one of them the domain is live beside the copy that was promoted over
+// it, and the role says so.
+func TestAFenceFailedIsRecognisedFromTheRoleWithNoLedgerEntry(t *testing.T) {
+	// No ledger entry at all.
+	bare := FailoverRow{Role: store.RoleFenced, Active: true}
+	if !bare.FenceFailed() {
+		t.Error("a domain marked fenced and still running was reported as healthy because no ledger entry existed; that is the state a hand-run fence, a lost state_dir and an unrecorded fence all leave behind")
+	}
+
+	// The ledger says the fence completed, and the domain is running anyway --
+	// started again by hand, or by a reboot that honoured a stale autostart flag.
+	restarted := FailoverRow{Role: store.RoleFenced, Active: true,
+		Fenced: &store.ReportFenced{FenceID: "f9", State: "done", PeerRef: "hyper02p:web01"}}
+	if !restarted.FenceFailed() {
+		t.Error("a fence the ledger calls done, on a domain that is running again, is a live split brain -- the ledger records what the fence DID, not what is true now")
+	}
+
+	// And it still clears by itself the moment the domain is stopped, which is
+	// what keeps this from latching forever.
+	stopped := FailoverRow{Role: store.RoleFenced, Active: false}
+	if stopped.FenceFailed() {
+		t.Error("a fenced domain that is stopped is a fence that worked, and must not alarm")
+	}
+
+	// The role alone, without Active, is not the alarm: that is the ordinary
+	// resting state of every successfully fenced domain in an estate.
+	if !stopped.WasFenced() {
+		t.Error("fixture drift: a stopped fenced domain should still read as having been fenced")
+	}
+}
+
+// The row must not tell an operator the domain was stopped while it is running.
+//
+// The ledger's "stopped by vmsync — this is not an administrative pause" line is
+// calm and correct for a fence that worked, and flatly false for one that did not.
+// Rendered together with the alarm it would read as a contradiction, and the calm
+// sentence is the one an operator skimming would believe.
+func TestAFenceLedgerSayingDoneDoesNotClaimAStoppedDomainWhileItRuns(t *testing.T) {
+	done := &store.ReportFenced{FenceID: "f9", State: "done", PeerRef: "hyper02p:web01"}
+
+	html := renderFailoverRowHTML(t, FailoverRow{
+		VM: "web01", Role: store.RoleFenced, Active: true, Fenced: done,
+	})
+	if strings.Contains(html, "stopped by vmsync") {
+		t.Errorf("the page says the domain was stopped by vmsync while reporting it as running:\n%s", html)
+	}
+	if !strings.Contains(html, "fenced but still running") {
+		t.Errorf("the page does not say the fence left the domain running:\n%s", html)
+	}
+	if !strings.Contains(html, "Stop this domain by hand") {
+		t.Errorf("the page does not say what to do about it:\n%s", html)
+	}
+
+	// The calm sentence is still there for the fence that actually worked.
+	ok := renderFailoverRowHTML(t, FailoverRow{
+		VM: "web01", Role: store.RoleFenced, Active: false, Fenced: done,
+	})
+	if !strings.Contains(ok, "stopped by vmsync") {
+		t.Errorf("a fence that worked lost its explanation:\n%s", ok)
+	}
+	if strings.Contains(ok, "fenced but still running") {
+		t.Errorf("a stopped domain was reported as still running:\n%s", ok)
+	}
+}
+
+// renderFailoverRowHTML renders the page for a view holding exactly one row, so a
+// test can assert on the words an operator reads for that row rather than on the
+// accessor behind them. The distinction matters here: the accessor was already
+// right for the ledger-backed case and the TEMPLATE still contradicted it.
+func renderFailoverRowHTML(t *testing.T, r FailoverRow) string {
+	t.Helper()
+	s := testServer(t)
+	if r.Hostname == "" {
+		r.Hostname = "hyper01p"
+	}
+	if r.AgentID == "" {
+		r.AgentID = "src"
+	}
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: FailoverView{Rows: []FailoverRow{r}},
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	return buf.String()
+}
