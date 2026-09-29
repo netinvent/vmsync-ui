@@ -323,6 +323,24 @@ type ReportDomain struct {
 	// rejected. Upgrade the UI, then the engines, then the agents.
 	LastPromotedAt     string `json:"last_promoted_at,omitempty"`
 	LastPromotedAtUnix int64  `json:"last_promoted_at_unix,omitempty"`
+	// Leftovers is every displaced set beside this VM's disks that nothing has
+	// removed: replica disks a rebuild renamed aside, restore-point stores a
+	// reinit set aside, restore copies staged and never used.
+	//
+	// Carried because this console is where somebody decides whether the DR host
+	// has room for another full copy, and because nothing else shows these at
+	// all: they are made by the DEFAULT replaced-disk action, no sweep reaps
+	// them, and the aside STORES are invisible to every listing vmsync has --
+	// they sit beside the per-domain stores, so a restore-point listing cannot
+	// see them, and the points inside them are outside every store, so no
+	// command can name them. They also share extents when new and diverge as the
+	// replica is written, so `du` on the day they are made says they are free.
+	//
+	// UPGRADE ORDER, as with the fields above: this must exist here before any
+	// agent that sends it is deployed, because the report body is decoded with
+	// DisallowUnknownFields and an agent upgraded first has its ENTIRE report
+	// rejected. Upgrade the UI, then the engines, then the agents.
+	Leftovers []ReportLeftover `json:"leftovers,omitempty"`
 	// LastReplicatedAtUnix / LastReplicatedTo are the SOURCE side of what
 	// LastSyncUnix records on a target -- the same fact from the other end,
 	// so the question survives losing one of the two hosts.
@@ -1506,6 +1524,20 @@ type ReportDisk struct {
 // to be told which of them was ever actually compared against the source.
 // Showing nothing would make "never checked" and "checked and clean" look the
 // same at exactly the wrong moment.
+// ReportLeftover is one displaced set an agent reported, mirroring the engine's
+// inventory.LeftoverInfo and the agent's ReportLeftover.
+//
+// Kind is carried rather than inferred from the path because the recovery
+// differs: a "replaced-disk" is moved back over a half-written replica, an
+// "aside-store" holds restore points no command can name, and a
+// "restore-staging" copy is simply removable.
+type ReportLeftover struct {
+	Path   string `json:"path"`
+	Kind   string `json:"kind"`
+	Bytes  int64  `json:"bytes"`
+	AtUnix int64  `json:"at_unix,omitempty"`
+}
+
 type ReportRestorePoint struct {
 	Tag              string   `json:"tag"`
 	TakenAtUnix      int64    `json:"taken_at_unix"`

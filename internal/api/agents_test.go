@@ -734,3 +734,96 @@ func TestAReportCarryingRestorePointsIsAccepted(t *testing.T) {
 		t.Error("restored_at_unix equals the restore point's taken_at; they are different instants")
 	}
 }
+
+// The same contract for the two fields this build added, and the reason it is
+// its own test is the same reason the verification one is: the failure is
+// specific and silent.
+//
+// last_promoted_at and leftovers arrive from agents newer than a UI that does
+// not know them, and DisallowUnknownFields rejects the WHOLE report over either
+// -- domains, roles, sync results and all. The console then shows an estate that
+// has apparently stopped reporting, on the day somebody upgraded the agents.
+//
+// Raw JSON, copied from the agent's own wire tags, for the reason the test above
+// gives: marshalling the type this decodes into would agree with itself no
+// matter what the agent actually sends.
+func TestAReportCarryingAPromotionTraceAndLeftoversIsAccepted(t *testing.T) {
+	srv, ts := newTestServer(t)
+	id, token := enrolAgent(t, srv, ts, "hyper01p")
+
+	const body = `{
+	  "reported_at_unix": 1800000000,
+	  "agent_version": "0.40",
+	  "hostname": "hyper01p",
+	  "libvirt_uri": "qemu:///system",
+	  "domains": [
+	    {
+	      "name": "web01",
+	      "role": "paused",
+	      "replica_source": "hyper00p:web01",
+	      "last_promoted_at": "1799999500",
+	      "last_promoted_at_unix": 1799999500,
+	      "leftovers": [
+	        {
+	          "path": "/vm_data/web01.qcow2.vmsync-replaced-1758441600",
+	          "kind": "replaced-disk",
+	          "bytes": 32212254720,
+	          "at_unix": 1758441600
+	        },
+	        {
+	          "path": "/vm_data/.vmsync-rp/.replaced-vm-web01-1758441500",
+	          "kind": "aside-store",
+	          "bytes": 5368709120,
+	          "at_unix": 1758441500
+	        }
+	      ],
+	      "status": "ok",
+	      "age_seconds": 12
+	    }
+	  ]
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/agents/"+id+"/report", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("report = %s, want 204 -- one of these field names is missing here, which rejects the "+
+			"whole report rather than that field, so every upgraded host reads as offline", resp.Status)
+	}
+
+	got, ok, err := srv.Store.Report(id)
+	if err != nil || !ok {
+		t.Fatalf("Report() = ok:%v err:%v", ok, err)
+	}
+	if len(got.Domains) != 1 {
+		t.Fatalf("stored %d domains, want 1", len(got.Domains))
+	}
+	d := got.Domains[0]
+
+	// Verbatim, because presence is the finding: a value this build cannot parse
+	// still means this copy served live, and a console that kept only the parsed
+	// form would read an unparsable record as a zero -- "never promoted" -- on
+	// exactly the domain where that mistake offers Roll back and Force clean
+	// resync over the only copy of production data.
+	if d.LastPromotedAt != "1799999500" || d.LastPromotedAtUnix != 1799999500 {
+		t.Errorf("the promotion trace did not survive decoding: %q / %d", d.LastPromotedAt, d.LastPromotedAtUnix)
+	}
+	if len(d.Leftovers) != 2 {
+		t.Fatalf("stored %d leftovers, want 2: %+v", len(d.Leftovers), d.Leftovers)
+	}
+	// Every field, because Kind decides which recovery an operator reaches for,
+	// Bytes is the number the whole report exists to carry, and Path is what
+	// somebody is about to delete.
+	want := store.ReportLeftover{
+		Path: "/vm_data/.vmsync-rp/.replaced-vm-web01-1758441500",
+		Kind: "aside-store", Bytes: 5368709120, AtUnix: 1758441500,
+	}
+	if d.Leftovers[1] != want {
+		t.Errorf("leftovers[1] = %+v, want %+v -- the aside stores are invisible to every listing there "+
+			"is, so a report that drops them is the only thing between an operator and an ENOSPC", d.Leftovers[1], want)
+	}
+}

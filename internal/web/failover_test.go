@@ -1991,9 +1991,12 @@ func TestAStaleTabCannotIssueAnOperationThePageWouldNoLongerOffer(t *testing.T) 
 		t.Fatalf("the stale submission was ACCEPTED (%q) -- a force-clean over a copy that is "+
 			"serving live is exactly what this re-check exists to stop", loc)
 	}
-	// The refusal has to be actionable, not just a refusal: it must name the
-	// peer that carries the record and the command that releases it.
-	if !strings.Contains(loc, "release-promotion") {
+	// The refusal has to be actionable, not just a refusal. This fixture's peer is
+	// still marked `promoted`, so the remedy is Invert (which keeps the data) or
+	// the stop/demote/release sequence — NOT the bare -release-promotion command,
+	// which the engine refuses on a domain still marked promoted. So the
+	// assertion is on the route, not on a literal flag.
+	if !strings.Contains(loc, "Invert") || !strings.Contains(loc, "release+the+promotion") {
 		t.Errorf("the refusal does not say what clears it: %q", loc)
 	}
 	if ops, err := s.Store.Operations(); err != nil || len(ops) != 0 {
@@ -2075,5 +2078,435 @@ func TestSetRoleToTargetIsRefusedOnACopyThatServedLive(t *testing.T) {
 	}); rec.Code != http.StatusSeeOther || strings.Contains(rec.Header().Get("Location"), "error=") {
 		t.Errorf("setting a harmless role was refused too, which locks the operator out: %q",
 			rec.Header().Get("Location"))
+	}
+}
+
+// TestInvertIsIssuableAgainstADemotedPeerThatServedLive closes the loop on the
+// dead end, at the level where it actually bit: the HTTP handler.
+//
+// The engine's AssessInvert was relaxed to accept a promoted end demoted to
+// paused/fenced/target when it carries the promotion record — that relaxation
+// exists precisely because "shut it down, then reverse the pair" is the advice
+// every served-live refusal gives, and shutting the copy down records `paused`.
+// The console's CanInvert was left requiring PeerRole == promoted, so the page
+// recommended Invert in four separate messages, did not render the button, and
+// refuseIneligible refused a hand-made POST with the generic "no longer
+// possible … Reload and look at the row again".
+func TestInvertIsIssuableAgainstADemotedPeerThatServedLive(t *testing.T) {
+	for _, role := range []string{store.RolePaused, store.RoleFenced, store.RoleTarget} {
+		t.Run("peer is "+role, func(t *testing.T) {
+			s := testServer(t)
+			_, reports := seedFailoverFleet(t, s)
+
+			// hyper02p:web01 was promoted; now it has been demoted the way the
+			// console's own advice produces, keeping only the durable record.
+			dr := reports["dr"]
+			for i := range dr.Domains {
+				if dr.Domains[i].Name == "web01" {
+					dr.Domains[i].Role = role
+					dr.Domains[i].Active = false
+					dr.Domains[i].PromotedFrom = ""
+					dr.Domains[i].PromotedAtUnix = 0
+					dr.Domains[i].FenceID = ""
+					dr.Domains[i].FenceSource = ""
+					dr.Domains[i].LastPromotedAt = strconv.FormatInt(now.Unix()-600, 10)
+					dr.Domains[i].LastPromotedAtUnix = now.Unix() - 600
+				}
+			}
+			if err := s.Store.SaveReport("dr", dr); err != nil {
+				t.Fatalf("save report: %v", err)
+			}
+			// The old source must be down: an inversion makes it a replication
+			// target, and the engine refuses to stop a running domain for it.
+			src := reports["src"]
+			for i := range src.Domains {
+				if src.Domains[i].Name == "web01" {
+					src.Domains[i].Active = false
+					src.Domains[i].Fenced = nil
+				}
+			}
+			if err := s.Store.SaveReport("src", src); err != nil {
+				t.Fatalf("save report: %v", err)
+			}
+
+			// The page must offer it...
+			agents, reps, err := s.loadFleet()
+			if err != nil {
+				t.Fatalf("loadFleet: %v", err)
+			}
+			row := rowFor(t, BuildFailoverView(agents, reps, nil, now), "hyper01p", "web01")
+			if row.PeerRef != "hyper02p:web01" {
+				t.Fatalf("the source's row is about peer %q, want hyper02p:web01 -- the demoted copy that served", row.PeerRef)
+			}
+			if !row.CanInvert() {
+				t.Fatalf("the source's row does not offer Invert against a %s peer carrying a promotion record, "+
+					"so the remedy every served-live refusal points at is not on the page", role)
+			}
+
+			// ...and the handler must accept it.
+			rec := post(t, s, "/failover/operation", url.Values{
+				"kind": {store.OpInvert}, "agent_id": {"src"}, "vm": {"web01"},
+				"peer_host": {"hyper02p"}, "peer_vm": {"web01"},
+			})
+			loc := rec.Header().Get("Location")
+			if rec.Code != http.StatusSeeOther || strings.Contains(loc, "error=") {
+				t.Fatalf("the inversion was refused server-side: %d %q -- the console recommends this "+
+					"operation and then will not issue it", rec.Code, loc)
+			}
+			cfg, _, err := s.Store.AgentConfigFor("src")
+			if err != nil {
+				t.Fatalf("agent config: %v", err)
+			}
+			if len(cfg.Operations) != 1 || cfg.Operations[0].Kind != store.OpInvert {
+				t.Fatalf("the old source's agent was published %+v, want one invert", cfg.Operations)
+			}
+		})
+	}
+}
+
+// TestInvertIsStillRefusedWithoutTheRecord: the relaxation must not become "any
+// paused peer is invertible". Without the record this would offer to reverse a
+// pair that was never failed over, which is what the check is for.
+func TestInvertIsStillRefusedWithoutTheRecord(t *testing.T) {
+	s := testServer(t)
+	_, reports := seedFailoverFleet(t, s)
+
+	dr := reports["dr"]
+	for i := range dr.Domains {
+		if dr.Domains[i].Name == "web01" {
+			dr.Domains[i].Role = store.RolePaused
+			dr.Domains[i].Active = false
+			dr.Domains[i].PromotedFrom = ""
+			dr.Domains[i].PromotedAtUnix = 0
+			dr.Domains[i].LastPromotedAt = ""
+			dr.Domains[i].LastPromotedAtUnix = 0
+		}
+	}
+	if err := s.Store.SaveReport("dr", dr); err != nil {
+		t.Fatalf("save report: %v", err)
+	}
+
+	rec := post(t, s, "/failover/operation", url.Values{
+		"kind": {store.OpInvert}, "agent_id": {"src"}, "vm": {"web01"},
+		"peer_host": {"hyper02p"}, "peer_vm": {"web01"},
+	})
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=") {
+		t.Fatalf("an inversion was accepted against a peer with no promotion record: %q", loc)
+	}
+	if ops, err := s.Store.Operations(); err != nil || len(ops) != 0 {
+		t.Errorf("%d operations created", len(ops))
+	}
+}
+
+// TestAFanOutSourceIsAboutTheCopyThatServed pins the peer SELECTION half of the
+// same regression. CanInvert cannot fire on a peer the row was never about.
+//
+// pickPromotedTarget preferred only a `promoted` target — and that stops matching
+// the moment the promoted copy is shut down, which is the first thing anybody
+// does with it. A fan-out source then fell through to targets[0] and the row was
+// about an unrelated healthy replica, so neither the Invert button nor the
+// force-clean warning was about the copy holding the live data.
+func TestAFanOutSourceIsAboutTheCopyThatServed(t *testing.T) {
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix() - 30},
+		{ID: "dr1", Hostname: "dr01", LastSeenAt: now.Unix() - 30},
+		{ID: "dr2", Hostname: "dr02", LastSeenAt: now.Unix() - 30},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{{
+			Name: "web01", Active: false, Role: store.RoleSource,
+			// dr01 first, deliberately: it is the healthy one, and it is what
+			// targets[0] would have selected.
+			ReplicaTargets: []string{"dr01:web01", "dr02:web01"},
+		}}},
+		"dr1": {Hostname: "dr01", Domains: []store.ReportDomain{{
+			Name: "web01", Active: false, Role: store.RoleTarget, ReplicaSource: "hyper01p:web01",
+		}}},
+		"dr2": {Hostname: "dr02", Domains: []store.ReportDomain{{
+			Name: "web01", Active: false, Role: store.RolePaused, ReplicaSource: "hyper01p:web01",
+			LastPromotedAt: "1756000000", LastPromotedAtUnix: 1756000000,
+		}}},
+	}
+
+	row := rowFor(t, BuildFailoverView(agents, reports, nil, now), "hyper01p", "web01")
+	if row.PeerRef != "dr02:web01" {
+		t.Fatalf("the source's row is about %q, want dr02:web01 -- the copy that served live. The row "+
+			"carries the warnings and the Invert button, and about the wrong peer they are about nothing", row.PeerRef)
+	}
+	if !row.PeerServedLive() {
+		t.Error("PeerServedLive is false, so the resync controls are offered over the copy that served")
+	}
+	if row.CanForceClean() || row.CanReinit() {
+		t.Error("a full resync is offered into the copy that served live")
+	}
+	// CanInvert is deliberately NOT asserted here, in either direction. On a
+	// fan-out the engine refuses an inversion outright — a domain cannot be both
+	// a replication target and the live source of other targets — and whether
+	// this page should withhold the button or leave the engine to explain is a
+	// standing choice it makes the same way everywhere (see
+	// TestFailoverOffersOnlyTheActionsAStateAllows, which pins Invert as offered
+	// on a running source it will also be refused for). An earlier version of
+	// this test asserted the button was offered, which would have failed the
+	// build for anyone who later added the check.
+}
+
+// TestAnInvertedPairRendersNoStandingReleaseInstruction is the whole of
+// regression A as the operator meets it: a page, rendered, with nothing on it
+// telling them to discard the live primary.
+//
+// Both rows are checked, because the defect had two halves and fixing the first
+// left the second rendering on every inverted pair in the estate: the replica's
+// row carries the peer column, and the peer is the primary.
+func TestAnInvertedPairRendersNoStandingReleaseInstruction(t *testing.T) {
+	// Exactly AssessInvert's output: the promoted copy became the source with
+	// its replica_source removed, the old source became its target.
+	agents := []store.Agent{
+		{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix() - 30},
+		{ID: "dr", Hostname: "hyper02p", LastSeenAt: now.Unix() - 30},
+	}
+	reports := map[string]store.Report{
+		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{{
+			Name: "web01", Active: false, Role: store.RoleTarget,
+			ReplicaSource: "hyper02p:web01", LastSyncUnix: now.Unix() - 300,
+		}}},
+		"dr": {Hostname: "hyper02p", Domains: []store.ReportDomain{{
+			Name: "web01", Active: true, Role: store.RoleSource,
+			ReplicaTargets: []string{"hyper01p:web01"},
+			// Kept by the inversion on purpose; replica_source cleared by it.
+			LastPromotedAt: strconv.FormatInt(now.Unix()-7200, 10), LastPromotedAtUnix: now.Unix() - 7200,
+		}}},
+	}
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	primary := rowFor(t, v, "hyper02p", "web01")
+	if !primary.ServedLive() {
+		t.Fatal("the primary lost the record; it is what refuses -update-role target there")
+	}
+	if primary.ServedLiveUnresolved() {
+		t.Error("the primary's own row flags it as awaiting a decision")
+	}
+
+	replica := rowFor(t, v, "hyper01p", "web01")
+	if replica.PeerRef != "hyper02p:web01" {
+		t.Fatalf("the replica's row is about %q, want the primary", replica.PeerRef)
+	}
+	if replica.PeerServedLiveUnresolved() {
+		t.Error("the replica's row flags its primary as awaiting a decision, with a release command " +
+			"aimed at the running copy")
+	}
+
+	// And the rendered page, because a predicate can be right while a template
+	// reads a different one — which is exactly what happened: the row's pill was
+	// switched to the resolution rule and the peer column's was left on presence.
+	s := testServer(t)
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	body := buf.String()
+	if strings.Contains(body, "has served live") {
+		t.Error("the rendered page carries a `has served live` marker on a fully resolved pair")
+	}
+	if strings.Contains(body, "-release-promotion") {
+		t.Error("the rendered page tells the operator to release a promotion on a fully resolved pair. " +
+			"The live primary is running, so the command would be refused -- and obeyed, it would strip " +
+			"the guard that keeps that primary from being turned back into a replica")
+	}
+}
+
+// TestTheLivePromotedRowDemandsATypedConfirmation is clause 3 of CI-36, checked
+// where it counts: the endpoint. A required attribute in the template is a hint,
+// not a guard — a stale tab, a back button or a curl skips it entirely, which is
+// the same hole refuseIneligible exists to close.
+//
+// hyper02p:web01 in the fixture is promoted AND running: the copy serving
+// production after a failover, carrying the fence armed against hyper01p:web01.
+func TestTheLivePromotedRowDemandsATypedConfirmation(t *testing.T) {
+	for _, tc := range []struct {
+		kind string
+		form url.Values
+		// wantMentions is what the refusal must name. The fence appears for the
+		// SHUTDOWN only: stopping the guest leads to a role write that discards
+		// the token, while promoted->source deliberately keeps it (see
+		// fenceTokenFields), so claiming a fence loss there would be false.
+		wantMentions []string
+	}{
+		{store.OpShutdown, url.Values{"kind": {store.OpShutdown}, "agent_id": {"dr"}, "vm": {"web01"}},
+			[]string{"web01", "hyper02p", "fence"}},
+		{store.OpSetRole, url.Values{"kind": {store.OpSetRole}, "agent_id": {"dr"}, "vm": {"web01"}, "role": {"source"}},
+			[]string{"web01", "hyper02p", "RUNNING"}},
+	} {
+		t.Run(tc.kind+" without a confirmation", func(t *testing.T) {
+			s := testServer(t)
+			seedFailoverFleet(t, s)
+
+			rec := post(t, s, "/failover/operation", tc.form)
+			loc := rec.Header().Get("Location")
+			if rec.Code != http.StatusSeeOther || !strings.Contains(loc, "error=") {
+				t.Fatalf("%s against the live promoted copy was accepted with no typed confirmation: %d %q",
+					tc.kind, rec.Code, loc)
+			}
+			// The refusal has to be actionable: name the VM, the host, and — where
+			// it is true — what the fence loss means.
+			for _, want := range tc.wantMentions {
+				if !strings.Contains(loc, want) {
+					t.Errorf("%s: refusal does not mention %q: %q", tc.kind, want, loc)
+				}
+			}
+			if tc.kind == store.OpSetRole && strings.Contains(loc, "fence") {
+				t.Errorf("set-role to `source` claims a fence loss, but that transition keeps the token: %q", loc)
+			}
+			if ops, err := s.Store.Operations(); err != nil || len(ops) != 0 {
+				t.Errorf("%s: %d operations were created", tc.kind, len(ops))
+			}
+		})
+
+		t.Run(tc.kind+" with the wrong name typed", func(t *testing.T) {
+			s := testServer(t)
+			seedFailoverFleet(t, s)
+			form := url.Values{}
+			for k, v := range tc.form {
+				form[k] = v
+			}
+			form.Set("confirm_vm", "db01") // a real VM, the wrong one
+			if rec := post(t, s, "/failover/operation", form); !strings.Contains(rec.Header().Get("Location"), "error=") {
+				t.Fatalf("%s was accepted with another VM's name typed", tc.kind)
+			}
+			if ops, err := s.Store.Operations(); err != nil || len(ops) != 0 {
+				t.Errorf("%s: %d operations were created", tc.kind, len(ops))
+			}
+		})
+
+		t.Run(tc.kind+" with the name typed", func(t *testing.T) {
+			s := testServer(t)
+			seedFailoverFleet(t, s)
+			form := url.Values{}
+			for k, v := range tc.form {
+				form[k] = v
+			}
+			form.Set("confirm_vm", " web01 ") // trimmed, so a stray space is not a trap
+			rec := post(t, s, "/failover/operation", form)
+			loc := rec.Header().Get("Location")
+			if rec.Code != http.StatusSeeOther || strings.Contains(loc, "error=") {
+				t.Fatalf("%s was refused with the name correctly typed: %q -- the guard has become a wall", tc.kind, loc)
+			}
+			cfg, _, err := s.Store.AgentConfigFor("dr")
+			if err != nil {
+				t.Fatalf("agent config: %v", err)
+			}
+			if len(cfg.Operations) != 1 || cfg.Operations[0].Kind != tc.kind {
+				t.Fatalf("%s: agent was published %+v", tc.kind, cfg.Operations)
+			}
+		})
+	}
+}
+
+// TestALivePromotedRowIsRefusedEveryRoleButSource: clause 4 at the endpoint. The
+// engine refuses these outright, so accepting them here would burn the VM's
+// one-in-flight operation slot to deliver a failure.
+func TestALivePromotedRowIsRefusedEveryRoleButSource(t *testing.T) {
+	for _, role := range []string{store.RoleTarget, store.RolePaused} {
+		t.Run("role "+role, func(t *testing.T) {
+			s := testServer(t)
+			seedFailoverFleet(t, s)
+			rec := post(t, s, "/failover/operation", url.Values{
+				"kind": {store.OpSetRole}, "agent_id": {"dr"}, "vm": {"web01"},
+				"role": {role}, "confirm_vm": {"web01"},
+			})
+			if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=") {
+				t.Fatalf("role=%s was accepted on a live promoted copy even with the name typed: %q", role, loc)
+			}
+			if ops, err := s.Store.Operations(); err != nil || len(ops) != 0 {
+				t.Errorf("%d operations created", len(ops))
+			}
+		})
+	}
+}
+
+// TestAnOrdinaryRowStillTakesOneClick is the other half of proportionality: the
+// confirmation must not spread to rows where a misclick is undoable, or it stops
+// being read. hyper01p:web01 is a running SOURCE — shutting it down is the first
+// step of a planned failover, and it stays one click.
+func TestAnOrdinaryRowStillTakesOneClick(t *testing.T) {
+	s := testServer(t)
+	seedFailoverFleet(t, s)
+	rec := post(t, s, "/failover/operation", url.Values{
+		"kind": {store.OpShutdown}, "agent_id": {"src"}, "vm": {"web01"},
+	})
+	loc := rec.Header().Get("Location")
+	if rec.Code != http.StatusSeeOther || strings.Contains(loc, "error=") {
+		t.Fatalf("shutting down a running source now needs a typed confirmation: %q", loc)
+	}
+	cfg, _, err := s.Store.AgentConfigFor("src")
+	if err != nil {
+		t.Fatalf("agent config: %v", err)
+	}
+	if len(cfg.Operations) != 1 {
+		t.Fatalf("got %+v, want one shutdown", cfg.Operations)
+	}
+}
+
+// TestTheLivePromotedRowRendersTruthfully is the render assertion for the copy
+// that lies closest to production, and it exists because the first version of
+// this block asserted the opposite of what the engine does.
+//
+// It claimed `source` "keeps this data" while the engine's own strip list
+// discarded the fence on that very transition — the one control the whole guard
+// exists to slow down, denying the harm the guard was built around. Both are now
+// true (promoted->source keeps the token), and this pins the page to it.
+func TestTheLivePromotedRowRendersTruthfully(t *testing.T) {
+	s := testServer(t)
+	agents, reports := failoverFixture()
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	// hyper02p:web01 is promoted, running, and carries the fence armed against
+	// hyper01p:web01 — exactly the row this is about.
+	row := rowFor(t, v, "hyper02p", "web01")
+	if !row.IsLivePromoted() || row.ArmedFenceSource == "" {
+		t.Fatalf("fixture drifted: live=%v armedFence=%q", row.IsLivePromoted(), row.ArmedFenceSource)
+	}
+
+	var buf strings.Builder
+	if err := s.tpl.ExecuteTemplate(&buf, "failover.html", pageData{
+		User:     auth.User{Username: "op", Role: auth.RoleAdmin, CSRF: "tok"},
+		Active:   "failover",
+		Failover: v,
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	body := buf.String()
+	// Whitespace-collapsed, because the template wraps these sentences across
+	// lines and an assertion that depends on where it wraps is an assertion about
+	// the formatter.
+	flat := strings.Join(strings.Fields(body), " ")
+
+	for _, want := range []string{
+		`name="confirm_vm"`,                               // the typed confirmation is asked for
+		"Shut down web01 on hyper02p",                     // VM and host in the label
+		"Set web01 on hyper02p to source",                 // and on the other control
+		"is serving production right now",                 // says what the row is
+		"it keeps the fence armed against hyper01p:web01", // true now, and it must say so
+		"rewrites <strong>this end only</strong>",         // `source` is a step, not a resolution
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the live promoted row does not render %q", want)
+		}
+	}
+
+	// The claim that was false: `source` must not be described as losing the
+	// fence, and the fence sentence must not appear where no token was armed.
+	if strings.Contains(body, "would discard the fence") && !strings.Contains(body, "role written afterwards also discards the fence") {
+		t.Error("a control is described as discarding the fence without saying which one and when")
+	}
+
+	// app01 on hyper02p is promoted with NO fence armed (a drill). It must not be
+	// warned about losing a token that never existed.
+	drill := rowFor(t, v, "hyper02p", "app01")
+	if drill.ArmedFenceSource != "" {
+		t.Fatalf("fixture drifted: app01 should model a promotion that armed nothing")
 	}
 }

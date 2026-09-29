@@ -89,6 +89,16 @@ type FailoverRow struct {
 	// role at all and still plainly be somebody's replica.
 	IsReplica bool
 	IsSource  bool
+	// PeerIsReplica is whether the PEER still records a replica_source, i.e.
+	// whether it is somebody's replica as well as whatever its role claims.
+	//
+	// Carried for one distinction: a peer marked `source` that has genuinely
+	// been inverted into being the primary has no replica_source (the inversion
+	// removes it), while one an operator merely typed `-update-role source` at
+	// keeps it. Only the first is a resolved pair, and without this the second
+	// silences every warning this page shows about a copy that served live. See
+	// PeerServedLiveUnresolved.
+	PeerIsReplica bool
 
 	// AllocatedBytes is what this domain's disks actually occupy, and
 	// FreeBytes what remains on the storage under them. Shown because an
@@ -325,8 +335,54 @@ func (r FailoverRow) CanShutdown() bool { return r.AgentID != "" && r.Active }
 // agent there as a hard error while processing the very report carrying the
 // outcome -- an inversion that succeeded on both hypervisors and then jammed
 // its own result.
+//
+// "Actually promoted" means the ROLE or the durable RECORD, and both have to be
+// accepted here because the engine accepts both (pkg/failover's AssessInvert).
+// Requiring the role alone made this console recommend an operation it then
+// withheld and refused. Every place the page explains a served-live refusal
+// ends in "reverse the pair with Invert" -- and each of those fires on a peer
+// that has been DEMOTED, which is what reaching for an inversion involves:
+// shutting the promoted copy down records `paused`, a fence records `fenced`,
+// and an operator who already re-targeted it records `target`. So the row that
+// offers the remedy never rendered the button, and a hand-made POST met the
+// generic "no longer possible" refusal. The trace is what makes accepting the
+// three demoted spellings safe: without it this would offer to reverse a pair
+// that was never failed over at all, which is the check's real job.
+//
+// `source` is deliberately absent from the demoted set. A peer already marked
+// source is either an inversion that completed -- which AssessInvert reports as
+// AlreadyInverted, not as work to do -- or a pair whose two ends disagree, and
+// inventing a second interpretation of a half-inverted pair on a console is
+// worse than making somebody look at it.
+// AssessInvert's remaining refusals are deliberately NOT mirrored here, and that
+// is this page's existing philosophy rather than an omission: it requires THIS
+// domain to be shut down, requires the two ends to name each other, and refuses
+// a source that still fans out to other targets. The console offers the
+// resolution and the engine explains what is in the way -- the same choice as
+// leaving Promote offered on a replica it will refuse. See
+// TestFailoverOffersOnlyTheActionsAStateAllows, which pins Invert as offered on
+// a RUNNING source whose target is promoted, because inverting is the resolution
+// for that state even though the operator must stop the domain first.
+//
+// The cost is real and worth knowing: an operation the engine refuses still
+// occupies that VM's one-in-flight slot until the refusal round-trips. Widening
+// the offer to a demoted peer widens that window from the brief `promoted`
+// interval to the indefinite resting state after a drill.
 func (r FailoverRow) CanInvert() bool {
-	return r.AgentID != "" && r.IsSource && r.PeerSeen && r.PeerRole == store.RolePromoted
+	if r.AgentID == "" || !r.IsSource || !r.PeerSeen {
+		return false
+	}
+	if r.PeerRole == store.RolePromoted {
+		return true
+	}
+	if !r.PeerServedLive() {
+		return false
+	}
+	switch r.PeerRole {
+	case store.RolePaused, store.RoleFenced, store.RoleTarget:
+		return true
+	}
+	return false
 }
 
 // CanSetRole reports whether the role can be changed by hand.
@@ -338,17 +394,85 @@ func (r FailoverRow) CanSetRole() bool { return r.AgentID != "" }
 
 // CanSetRoleTarget reports whether `target` may be among the roles offered.
 //
-// Its own predicate rather than a condition on CanSetRole, because the escape
-// hatch must not close: a copy that served live can still be set to `source`
-// (making it the primary, which destroys nothing) or `paused`. Only `target` is
-// withheld, and only that one because it is the value that hands the domain
-// back to the replication machinery -- after which the next scheduled sync
-// overwrites it, unattended, with the copy it displaced.
+// A thin name over CanSetRoleTo, kept because the template and the tests read
+// better for it. `target` is the value that hands a domain back to the
+// replication machinery -- after which the next scheduled sync overwrites it,
+// unattended, with the copy it displaced -- so a copy that served live does not
+// get it. The engine refuses it too, and that is the real guard; this keeps the
+// option out of the menu so the refusal is not something an operator discovers
+// by choosing it.
 //
-// The engine refuses it too, and that is the real guard; this keeps the option
-// out of the menu so the refusal is not something an operator discovers by
-// choosing it.
-func (r FailoverRow) CanSetRoleTarget() bool { return !r.ServedLive() }
+// CAREFUL when rendering an explanation from this: it is false for TWO reasons
+// now, the promotion record and the row being a live promoted copy, and only the
+// first has anything to do with a release. Pair it with .ServedLive in any text
+// that mentions one.
+func (r FailoverRow) CanSetRoleTarget() bool { return r.CanSetRoleTo(store.RoleTarget) }
+
+// IsLivePromoted is the one row on this page where a misclick has no undo: a
+// domain marked `promoted` that is RUNNING, i.e. the copy currently serving
+// production after a failover.
+//
+// It reads like a detail and it is the subject of the whole set-role and
+// shutdown guard below. Both controls were offered on it with one click, no
+// confirmation and no host in the label, and either one relabels a live copy and
+// discards the fence token that authorises stopping the source when it returns.
+func (r FailoverRow) IsLivePromoted() bool {
+	return r.Role == store.RolePromoted && r.Active
+}
+
+// CanSetRoleTo reports whether this row may be asked for one particular role.
+//
+// One function rather than a predicate per value, because the rules are the
+// engine's and they have to be mirrored exactly once. Two of them:
+//
+//   - `target` is withheld from a copy that has served live. It is the value
+//     that hands the domain back to the replication machinery, after which the
+//     next scheduled sync overwrites it unattended with the copy it displaced.
+//     (`none` would do the same, and the console never offers it.)
+//   - NOTHING BUT `source` is offered on a live promoted row. SetReplicationRole
+//     refuses to record a running promoted domain as anything else, because every
+//     other value says something else is the live copy while this one is taking
+//     writes -- and the write would take the armed fence with it. `source` stays
+//     because it is the one value that remains true of a running copy, and it is
+//     how an operator keeps a copy that took over.
+//
+// So the escape hatch narrows rather than closing, which is the difference
+// between this and withholding set-role outright: on the row where a misclick
+// costs the most, the only thing still offered is the only thing that is still
+// TRUE of that row.
+//
+// What `source` costs is worth being exact about, because an earlier version of
+// this comment said it cost nothing and that was wrong twice over. It keeps the
+// data and, since promoted->source is the one transition that preserves the
+// fence token, it keeps the fence too. But it rewrites THIS END ONLY: the domain
+// this copy displaced still records itself as a source, so nothing replicates in
+// either direction until an -invert finishes the pair, and the served-live
+// reporting keeps saying so. It is a step, not a resolution.
+func (r FailoverRow) CanSetRoleTo(role string) bool {
+	if !r.CanSetRole() {
+		return false
+	}
+	if role == store.RoleTarget && r.ServedLive() {
+		return false
+	}
+	if r.IsLivePromoted() && role != store.RoleSource {
+		return false
+	}
+	return true
+}
+
+// NeedsTypedConfirmation reports whether this row's destructive controls must
+// make the operator type the VM's name before they will submit.
+//
+// True for exactly one state, the live promoted copy, and the reason is that a
+// click is not evidence of intent when the cost is this asymmetric. "Shut down
+// cleanly" and "Set role" sit next to each other on every row of a page that
+// lists a whole estate; on this row they stop the copy that is serving
+// production and discard the fence protecting it from its returning source,
+// and nothing about either button's label says which VM or which host it is
+// about. The rest of the page stays one click, because the rest of the page is
+// undoable.
+func (r FailoverRow) NeedsTypedConfirmation() bool { return r.IsLivePromoted() }
 
 // CanRestore reports whether this domain can be rolled back to one of its
 // restore points.
@@ -393,6 +517,15 @@ func (r FailoverRow) CanRestore() bool {
 	switch r.Role {
 	case store.RoleSource, store.RolePromoted:
 		return false
+	case store.RoleFenced:
+		// Mirrors the engine, which stopped accepting `fenced` here. A fenced
+		// domain is the copy a peer was promoted OVER: its disks hold what it was
+		// serving at the instant of the failover, which no restore point of its
+		// own contains, and it carries no promotion record to refuse on because it
+		// was displaced rather than promoted. `paused` stays allowed just above --
+		// that is a replica somebody chose to pause, and rolling one back is what
+		// this control is for.
+		return false
 	}
 	return true
 }
@@ -408,6 +541,84 @@ func (r FailoverRow) ServedLive() bool { return r.LastPromotedAt != "" }
 // the destructive sync controls have to ask -- they run on the source's row and
 // overwrite the peer.
 func (r FailoverRow) PeerServedLive() bool { return r.PeerLastPromotedAt != "" }
+
+// ServedLiveUnresolved is the narrower question the PAGE has to ask: has this
+// copy served live AND is it still waiting on a decision.
+//
+// Distinct from ServedLive, and the distinction is the fix for a real defect.
+// The GATES -- CanRestore, CanSetRoleTarget, CanReinit/CanForceClean via the
+// peer -- read presence alone and are right to: the record means these disks
+// held live data, and that is true whatever the role says now. The REPORTING
+// must not, because two roles mean this copy IS the authoritative one:
+//
+//   - `promoted`: the row already says so in the present tense, in the role
+//     cell and in the promoted-at line.
+//   - `source`: the primary of its pair, which is exactly where an -invert
+//     leaves the copy that served. That pair is RESOLVED.
+//
+// Keying the pill and the warnline on ServedLive alone marked the live primary
+// of every correctly inverted pair as a copy nobody had decided about, with a
+// standing instruction to release it -- an instruction that, followed, strips
+// the guard protecting it from being made a replica again. It could not even be
+// obeyed: -release-promotion refuses a running domain, and the primary is
+// running. Same rule as the agent's servedLiveUnresolved and
+// inventory.Assess's.
+//
+// `source` counts as resolved only when this domain is NOT also somebody's
+// replica (IsReplica, i.e. replica_source is set). An -invert clears
+// replica_source on the copy it makes the source; `-update-role source` typed at
+// a promoted copy does not, and leaves both ends of the pair reading `source`
+// with nothing replicating between them. Trusting the role alone would make that
+// one click a way to silence this page about a pair that had stopped working.
+func (r FailoverRow) ServedLiveUnresolved() bool {
+	return r.ServedLive() && r.Role != store.RolePromoted && !r.ServedLiveResolvedPrimary()
+}
+
+// ServedLiveResolvedPrimary reports that this copy served live and is now the
+// authoritative primary of its pair: an inversion completed, and nothing is
+// outstanding.
+//
+// The narrower of the two questions, and it exists because the wider one is
+// wrong in one place. A pill or a row warning is suppressed for a `promoted`
+// domain as well, because that row already says so in the present tense — but a
+// REFUSAL message must still give a promoted copy the full remedy, since a
+// failover nobody has resolved yet is exactly when "invert, or release it" is the
+// advice. So the refusal wording keys on this, and the pill keys on
+// ServedLiveUnresolved, which is this plus the `promoted` case.
+//
+// `source` alone is not enough: an -invert clears replica_source on the copy it
+// makes the source, while `-update-role source` typed at a promoted copy leaves
+// it. Only the first resolved anything.
+func (r FailoverRow) ServedLiveResolvedPrimary() bool {
+	return r.ServedLive() && r.Role == store.RoleSource && !r.IsReplica
+}
+
+// PeerServedLiveUnresolved is the same question about the other end, and it is
+// needed for the same reason PeerServedLive is: this page's warnings about a
+// copy live on the row of its PEER, because the controls they concern -- Full
+// resync, Force clean resync -- are fired from the source's row.
+//
+// Its absence was the other half of the same defect. The peer column's own pill
+// and warnline were keyed on PeerServedLive (presence), so after a correct
+// -invert the new REPLICA's row carried a critical "has served live" marker and
+// a release command aimed at the live primary: unobeyable while it runs, harmful
+// if obeyed, and never clearing. Fixing only this row's pill left that one
+// rendering on every inverted pair in the estate.
+//
+// CanReinit and CanForceClean deliberately keep reading PeerServedLive, not
+// this: they are GATES, and a resync into the primary of a pair must be refused
+// whatever that primary's role says.
+func (r FailoverRow) PeerServedLiveUnresolved() bool {
+	return r.PeerServedLive() && r.PeerRole != store.RolePromoted && !r.PeerServedLiveResolvedPrimary()
+}
+
+// PeerServedLiveResolvedPrimary is ServedLiveResolvedPrimary for the other end,
+// and it is what the resync refusals key their wording on: a promoted peer still
+// needs the full remedy, a peer that is already the primary of its own pair needs
+// to be told the pair's direction is the thing to look at.
+func (r FailoverRow) PeerServedLiveResolvedPrimary() bool {
+	return r.PeerServedLive() && r.PeerRole == store.RoleSource && !r.PeerIsReplica
+}
 
 // ServedLiveAt renders when this copy was promoted, for the explanation beside
 // the withheld controls. "an unrecorded time" when the record cannot be parsed,
@@ -488,8 +699,24 @@ func releaseCommand(host, vm string) string {
 // production was on a row that said nothing at all about it. The engine now
 // refuses both, and withholding them here means the refusal arrives before
 // the click, with PeerReleaseCommand saying what to do about it.
+//
+// And withheld while the peer is CURRENTLY promoted, which is a separate
+// condition and not a redundant one. The record covers every copy promoted by a
+// current binary; the role covers the one population that has no record, a domain
+// promoted by a build that predated the field. design/control-plane-ha.md called
+// this "the highest value-per-character item in this document" and it is: the
+// expression already appears three times in this file (CanInvert, SplitBrain,
+// PeerPromoted), so the data was always on the row. The engine refuses it now
+// too -- -force-clean no longer overrides `promoted` -- and this keeps the button
+// off the page rather than leaving an operator to discover that by pressing it.
 func (r FailoverRow) CanReinit() bool {
-	return r.AgentID != "" && r.IsSource && !r.PeerServedLive()
+	if r.AgentID == "" || !r.IsSource {
+		return false
+	}
+	if r.PeerRole == store.RolePromoted || r.PeerServedLive() {
+		return false
+	}
+	return true
 }
 
 // CanForceClean reports whether the destructive variant of a full resync can
@@ -1031,6 +1258,7 @@ func BuildFailoverView(
 				row.PeerReplicaIncomplete = peer.ReplicaIncomplete
 				row.PeerLastPromotedAt = peer.LastPromotedAt
 				row.PeerLastPromotedAtUnix = peer.LastPromotedAtUnix
+				row.PeerIsReplica = peer.ReplicaSource != ""
 			}
 
 			row.rank = rankRow(row)
@@ -1146,13 +1374,38 @@ func rankRow(r FailoverRow) int {
 
 // pickPromotedTarget chooses which of a source's targets a row is about.
 //
-// A promoted one if there is one, because that is the pair in an unresolved
-// state and the only one an action here applies to. Otherwise the first, so
-// the ordinary single-target case still shows its peer.
+// Three tiers, in this order:
+//
+//  1. A target marked `promoted`. That is the pair in an unresolved state and
+//     the only one an action on this row applies to.
+//  2. A target that has SERVED live and is not the authoritative copy —
+//     `paused`, `fenced` or re-targeted, still carrying last_promoted_at. This
+//     tier exists because tier 1 stops matching the moment the promoted copy is
+//     shut down, which is the first thing anybody does with it: the role becomes
+//     `paused` and the promotion record is erased. Without this tier a fan-out
+//     source picks some unrelated healthy target instead, and the row that can
+//     invert the pair, or that must warn about a resync into the copy which
+//     served, is about the wrong peer entirely.
+//  3. Otherwise the first, so the ordinary single-target case still shows its
+//     peer.
+//
+// The single-target case reached tier 3 and worked by luck. A fan-out did not.
 func pickPromotedTarget(targets []string, byRef map[string]store.ReportDomain) string {
 	for _, t := range targets {
 		h, vm := splitRef(t)
 		if peer, ok := byRef[refKey(h, vm)]; ok && peer.Role == store.RolePromoted {
+			return t
+		}
+	}
+	for _, t := range targets {
+		h, vm := splitRef(t)
+		peer, ok := byRef[refKey(h, vm)]
+		if !ok || peer.LastPromotedAt == "" {
+			continue
+		}
+		// Same rule as ServedLiveUnresolved: `source` means that end is the
+		// authoritative copy of its own pair, not a replica awaiting anything.
+		if peer.Role != store.RoleSource {
 			return t
 		}
 	}

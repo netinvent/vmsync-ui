@@ -710,7 +710,7 @@ func (s *Server) postFailoverOperation(w http.ResponseWriter, r *http.Request, u
 	// a second copy of the rules: a re-check that could disagree with the page
 	// is a re-check that will, and the disagreement would show up as a button
 	// that is offered and always refused, or worse, the reverse.
-	if err := s.refuseIneligible(agentID, op); err != nil {
+	if err := s.refuseIneligible(agentID, op, r.FormValue("confirm_vm")); err != nil {
 		s.redirectFailover(w, r, "", err.Error())
 		return
 	}
@@ -756,7 +756,7 @@ func (s *Server) postFailoverOperation(w http.ResponseWriter, r *http.Request, u
 // live agent's report, or no longer part of a pair -- and issuing a failover
 // operation against a domain the control plane cannot currently see is not
 // something to do on the strength of a form field.
-func (s *Server) refuseIneligible(agentID string, op store.Operation) error {
+func (s *Server) refuseIneligible(agentID string, op store.Operation, confirmVM string) error {
 	vm, kind := op.VM, op.Kind
 	agents, reports, err := s.loadFleet()
 	if err != nil {
@@ -776,6 +776,32 @@ func (s *Server) refuseIneligible(agentID string, op store.Operation) error {
 			break
 		}
 	}
+	// The typed confirmation, checked HERE rather than in the template's absence,
+	// because a form field is only a guard if the server insists on it. It applies
+	// to the two controls that act on a live promoted copy: stopping the copy that
+	// is serving production, and relabelling it — both of which discard the fence
+	// token protecting it from its returning source, and neither of which is
+	// undoable from this page.
+	//
+	// Matched against the row's OWN name after trimming, case-sensitively:
+	// libvirt domain names are case-sensitive, and the point of typing it is to
+	// have read which VM this is.
+	if found && row.NeedsTypedConfirmation() && (kind == store.OpShutdown || kind == store.OpSetRole) {
+		if strings.TrimSpace(confirmVM) != row.VM {
+			// The fence clause is conditional on a token actually being armed, and
+			// names the source the TOKEN names rather than whichever peer this row
+			// happens to be about. A promotion with no -fence-source armed nothing
+			// -- a drill, or one run from a shell -- and warning about losing a
+			// credential that never existed teaches an operator to discount the
+			// warning that matters.
+			fence := ""
+			if row.ArmedFenceSource != "" && kind == store.OpShutdown {
+				fence = fmt.Sprintf(", and the role written afterwards would discard the fence that authorises stopping %s if it comes back", row.ArmedFenceSource)
+			}
+			return fmt.Errorf("%s on %s is promoted and RUNNING — it is the copy currently serving production. %s would stop or relabel it%s, and neither can be undone from here. Type the VM's name exactly (%s) to confirm",
+				row.VM, row.Hostname, kind, fence, row.VM)
+		}
+	}
 	if !found {
 		return fmt.Errorf("%s is not in the current view of the fleet — its agent may have stopped reporting, or it may no longer be part of a replication pair. Reload this page before acting on it", vm)
 	}
@@ -792,12 +818,11 @@ func (s *Server) refuseIneligible(agentID string, op store.Operation) error {
 	case store.OpShutdown:
 		ok = row.CanShutdown()
 	case store.OpSetRole:
-		// Two questions, not one. The control stays available in every state
-		// -- it is the escape hatch, and `source` and `paused` destroy nothing
-		// -- but `target` is the value that hands a domain back to the
-		// replication machinery, after which the next scheduled sync overwrites
-		// it unattended. That one is withheld from a copy that served live.
-		ok = row.CanSetRole() && (op.Mode != store.RoleTarget || row.CanSetRoleTarget())
+		// Per-value, through the same function the menu is built from, so the
+		// page and the endpoint cannot offer different sets. It withholds
+		// `target` from a copy that served live, and everything but `source`
+		// from a live promoted row -- see CanSetRoleTo.
+		ok = row.CanSetRoleTo(op.Mode)
 	case store.OpRestore:
 		ok = row.CanRestore()
 	case store.OpReinit:
@@ -816,20 +841,68 @@ func (s *Server) refuseIneligible(agentID string, op store.Operation) error {
 	// their own wording and their own command: they are the only refusals here
 	// that a reload will not clear, and an operator who is not told that will
 	// reload until they conclude the console is broken.
+	//
+	// Each served-live case is split on whether a decision is actually
+	// outstanding. The REFUSAL is keyed on presence, matching the gate — those
+	// disks held live data whatever the role says now — but the REMEDY is not.
+	// Telling the live primary of a resolved pair to invert or release itself is
+	// advice it cannot follow (the release refuses a running domain) and must not
+	// (it would strip the guard that keeps that primary from being made a
+	// replica). See FailoverRow.ServedLiveUnresolved.
 	switch {
+	// FIRST, because it is the narrowest and because the served-live cases below
+	// would otherwise answer a live promoted row with advice about releasing a
+	// promotion — when what is wrong is that the copy is serving right now, which
+	// no release addresses and a reload never clears. Without this the generic
+	// tail said "its state changed after this page was drawn. Reload", about a
+	// state that had not changed and would not.
+	case kind == store.OpSetRole && row.IsLivePromoted() && op.Mode != store.RoleSource:
+		return fmt.Errorf("%s on %s is promoted and RUNNING, so recording it as `%s` would say something else is the live copy while this one is taking writes — vmsync refuses it. `source` is the one value still true of a running copy and is offered on that row. To hand this pair back the other way, stop the guest first (Shut down cleanly) and then set the role, or reverse the pair with Invert from %s's row",
+			row.VM, row.Hostname, op.Mode, orPeerDescription(row))
 	case kind == store.OpSetRole && op.Mode == store.RoleTarget && row.ServedLive():
-		return fmt.Errorf("%s was promoted at %s and has not been released, so making it a replication target again would arm the next scheduled sync to overwrite data that was serving live — vmsync refuses it. `source` and `paused` are still available here. If the failover stands, reverse the pair with Invert. If the data really is disposable, run:  %s",
+		if row.ServedLiveResolvedPrimary() {
+			return fmt.Errorf("%s was promoted at %s and is now the primary of its pair, so making it a replication target again would arm the next scheduled sync to overwrite live data — vmsync refuses it. Nothing is outstanding here: the promotion record is kept deliberately, and it is what refuses this. `paused` is still available if you need to suspend replication out of this domain",
+				vm, row.ServedLiveAt())
+		}
+		return fmt.Errorf("%s was promoted at %s and has not been released, so making it a replication target again would arm the next scheduled sync to overwrite data that was serving live — vmsync refuses it. `source` is still available here, and `paused` too once the domain is not running. If the failover stands, reverse the pair with Invert. If the data really is disposable, run:  %s",
 			vm, row.ServedLiveAt(), row.ReleaseCommand())
 	case (kind == store.OpRestore) && row.ServedLive():
+		if row.ServedLiveResolvedPrimary() {
+			return fmt.Errorf("%s was promoted at %s and is now the primary of its pair — restoring over it would overwrite live data with an older replica, and vmsync refuses it. Roll back the replica instead, or invert the pair first if this copy should become the replica",
+				vm, row.ServedLiveAt())
+		}
 		return fmt.Errorf("%s was promoted at %s and has not been released, so its disks may hold the only copy of the data that was serving then — vmsync refuses to restore over it. If the failover stands, reverse the pair with Invert, which keeps this data. If the data really is disposable, run:  %s",
 			vm, row.ServedLiveAt(), row.ReleaseCommand())
+	// Before the record-based case, because a peer that is currently promoted is
+	// the sharper statement and needs its own wording: the failover is in force
+	// right now, and the remedy is Invert rather than releasing anything. This is
+	// also the one branch that catches a peer with NO durable record — a domain
+	// promoted by a build that predated the field — which is the population the
+	// record cannot speak for.
+	case (kind == store.OpReinit || kind == store.OpForceClean) && row.PeerRole == store.RolePromoted:
+		return fmt.Errorf("%s:%s is marked `%s` — it is the live copy of a failover, and its disks are what that failover produced. A full resync into it would overwrite them with %s's, and vmsync refuses it, force-clean included. If the failover stands, reverse the pair with Invert. If that copy really is disposable, stop it, demote it and release the promotion on %s first",
+			row.PeerHost, row.PeerVM, store.RolePromoted, vm, row.PeerHost)
 	case (kind == store.OpReinit || kind == store.OpForceClean) && row.PeerServedLive():
+		if row.PeerServedLiveResolvedPrimary() {
+			return fmt.Errorf("%s:%s was promoted at %s and is now the primary of its own pair, so a full resync into it would overwrite live data — vmsync refuses it, force-clean included. Check which direction this pair is meant to replicate in; %s may no longer be its source",
+				row.PeerHost, row.PeerVM, row.PeerServedLiveAt(), vm)
+		}
 		return fmt.Errorf("%s:%s was promoted at %s and has not been released, so a full resync into it would overwrite data that was serving live — vmsync refuses it, force-clean included. If the failover stands, reverse the pair with Invert. If the data really is disposable, run:  %s",
 			row.PeerHost, row.PeerVM, row.PeerServedLiveAt(), row.PeerReleaseCommand())
 	case row.AgentID == "":
 		return fmt.Errorf("no enrolled agent reports for %s's host any more, so nothing can carry this out", vm)
 	}
 	return fmt.Errorf("%s is no longer possible on %s: its state changed after this page was drawn. Reload and look at the row again before acting", kind, vm)
+}
+
+// orPeerDescription names the other end of a pair for a message, falling back to
+// a description when this row does not know one. A refusal that says "reverse the
+// pair from 's row" is worse than one that says where to look.
+func orPeerDescription(row FailoverRow) string {
+	if row.PeerRef != "" {
+		return row.PeerRef
+	}
+	return "the domain it displaced"
 }
 
 // restorePointKnown reports whether an agent's latest report lists this tag

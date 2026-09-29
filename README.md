@@ -432,7 +432,7 @@ incident, when the person reading it is under pressure and moving fast:
 | --- | --- | --- |
 | an ordinary replica | **Promote** | there is nothing to invert until a failover has happened |
 | a source | **Shut down**, and **Invert** once its target is promoted | promoting a source would ask vmsync to overwrite the original with its own copy |
-| promoted and running | **Shut down**, **Set role** | re-promoting does nothing; invert makes it permanent |
+| promoted and running | **Shut down** and **Set role**, both behind a **typed confirmation**, and Set role narrowed to `source` | this is the copy serving production: stopping or relabelling it takes the workload down and discards the fence against its returning source, and neither is undoable from here. `source` stays because it is the one value still true of a running copy |
 | promoted, never started | **Finish the failover** | vmsync writes the promotion record *before* booting, so this is what a crash or a refused start leaves behind — and it must be finishable from here |
 | paused, including anything a fence stopped | **Set role** | the way back |
 
@@ -504,9 +504,9 @@ sync, same zero failure count. That is the state in which this console used to
 offer **Roll back** over it, and **Force clean resync** over it from the
 source's row, with nothing between the click and a full overwrite.
 
-So while the record is set, the row shows a **has served live** pill (only once
-the role has stopped saying `promoted` — while it still says so, the row already
-says it in the present tense) and a warning explaining what is refused, and:
+So while the record is set **and this copy is not the authoritative one**, the
+row shows a **has served live** pill and a warning explaining what is refused,
+and:
 
 - **Roll back** is withheld;
 - **Full resync** and **Force clean resync** are withheld on the *source's* row,
@@ -514,6 +514,51 @@ says it in the present tense) and a warning explaining what is refused, and:
   record is on the other end;
 - **Set role** stays available, but `target` is dropped from its menu. `source`
   and `paused` destroy nothing, and `source` is how you *keep* this copy.
+
+### A copy that is serving right now
+
+Separate from the above, and stricter. A row that is `promoted` **and running** is
+the copy currently serving production after a failover. Stopping it takes the
+workload down, and there is no undo from this page.
+
+So on that row alone:
+
+- **Shut down cleanly** and **Set role** both require the operator to **type the
+  VM's name**, and both name the VM and the host in their button labels. A page
+  that lists a whole estate puts those buttons next to each other on every row,
+  and nothing else distinguishes the one that stops production.
+- **Set role** offers `source` only. Everything else would record that something
+  else is the live copy while this one is taking writes, and vmsync refuses those
+  outright.
+
+The **fence** is the reason Shut down carries a warning and Set role does not. A
+promotion that armed one holds a token authorising the agent on the displaced
+source's host to stop that source when it comes back. Shutting this copy down
+records `paused` afterwards, which discards it; `source` **keeps** it, because
+that transition rewrites this end only and the arrangement the token describes is
+still in force. Where it is discarded, no role change puts it back — re-arming
+means `vmsync -update-role promoted` and then `vmsync -promote -fence-source`. The
+warning appears only when a token was actually armed; a drill that armed none is
+not warned about losing one.
+
+`source` is a **step, not a resolution**: the other end still records itself as a
+source, so nothing replicates either way until an **Invert** from that end's row
+finishes the pair. The row keeps reporting as unresolved until then.
+
+The confirmation is enforced when the form is submitted, not by the input's
+`required` attribute — a stale tab, a back button or a `curl` skips that, which is
+the same hole the server-side re-check exists to close. Every other row on the
+page stays one click, because every other row is undoable.
+
+Two roles are excluded from the pill and the warning, and the second one matters:
+`promoted` (the row already says it in the present tense) and **`source`** — the
+primary an inversion produced. That pair is resolved, and the record is still
+there only because the inversion deliberately keeps it, to refuse a later
+`-update-role target` on the live primary. Marking it as undecided put a standing
+"release this" instruction on the primary of every failed-over-and-inverted pair;
+following it would have stripped the guard, and it could not be followed anyway —
+the release refuses a running domain. The *controls* still read the record; only
+the reporting excludes these two.
 
 The way out is printed, not offered:
 
@@ -525,8 +570,13 @@ There is deliberately no button for it, no operation kind, and no field on an
 operation that carries it. Everything else vmsync guards can be satisfied from
 this console; this is the one that asks for a person at a shell on the host
 holding the data. If the failover stands, **Invert** is the alternative that
-keeps the data — and it now works even after the copy has been shut down and
-demoted, because the same record is what tells vmsync that end really did serve.
+keeps the data — and it is **offered on the old source's row** even after the
+promoted copy has been shut down and demoted to `paused`, `fenced` or `target`,
+because the same record is what tells vmsync that end really did serve. That
+matters because demoting the copy is the *normal* precondition for reaching for
+an inversion, so a console that only offered Invert against a `promoted` peer
+recommended a remedy it then withheld. On a fan-out source the row is also about
+the copy that served rather than whichever target happens to be listed first.
 
 **Every action is also re-checked server-side when it is submitted.** The
 predicates that decide what a row offers are evaluated again, against state read

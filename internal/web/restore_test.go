@@ -342,3 +342,364 @@ func TestOnlyTargetIsWithheldFromTheRoleMenu(t *testing.T) {
 		t.Error("`target` stays withheld after the record is released")
 	}
 }
+
+// --- the trace on the copy an inversion made the source -------------------
+
+// TestTheInvertedPrimaryIsNotReportedAsUndecided is a regression test, and the
+// regression was mine: the pill and the warnline keyed on ServedLive() alone.
+//
+// An inversion deliberately keeps the promotion record on the copy it makes the
+// source (pkg/failover's NewSourceRemovals excludes it), because that record is
+// what refuses -update-role target later — making the live primary of a pair
+// into a replica is exactly as destructive as overwriting a promoted copy. But
+// the pair is RESOLVED: that is what the inversion did. Reporting it as a copy
+// nobody has decided about put a standing "run -release-promotion" instruction
+// on the live primary of every failed-over-and-inverted pair — an instruction
+// that could not be obeyed (the release refuses a running domain) and that,
+// obeyed, would strip the guard.
+func TestTheInvertedPrimaryIsNotReportedAsUndecided(t *testing.T) {
+	// The post-invert primary: source, running, carrying the record.
+	primary := FailoverRow{
+		AgentID: "dr", Hostname: "hyper02p", VM: "web01",
+		Role: store.RoleSource, Active: true, IsSource: true,
+		LastPromotedAt: "1756000000", LastPromotedAtUnix: 1756000000,
+	}
+	if !primary.ServedLive() {
+		t.Fatal("the record is gone from the new source; it is what refuses -update-role target later")
+	}
+	if primary.ServedLiveUnresolved() {
+		t.Error("the live primary of a resolved pair is reported as awaiting a decision, with a standing " +
+			"instruction to release it that cannot be obeyed and must not be")
+	}
+
+	// A promoted copy: the row already says so in the present tense.
+	promoted := primary
+	promoted.Role = store.RolePromoted
+	if promoted.ServedLiveUnresolved() {
+		t.Error("a promoted row carries the warning twice over")
+	}
+
+	// And every role that is NOT the authoritative copy still reports, or the
+	// exclusion has become a blanket suppression.
+	for _, role := range []string{store.RolePaused, store.RoleFenced, store.RoleTarget, ""} {
+		r := primary
+		r.Role = role
+		r.Active = false
+		if !r.ServedLiveUnresolved() {
+			t.Errorf("role %q: a copy that served live and is not the authoritative one must still be reported", role)
+		}
+	}
+}
+
+// TestTheGatesReadPresenceNotResolution pins the split the fix rests on, because
+// collapsing the two predicates is the obvious tidy-up and it reopens the hole.
+//
+// The GATES ask "did these disks serve live" — true whatever the role says now.
+// The REPORTING asks "does somebody owe a decision" — false once this copy is
+// the authoritative one. A source that carries the record must still have
+// `target` withheld from its role menu: that is the transition which would make
+// the live primary a replica and arm the next sync to overwrite it.
+func TestTheGatesReadPresenceNotResolution(t *testing.T) {
+	primary := FailoverRow{
+		AgentID: "dr", VM: "web01", Role: store.RoleSource, Active: true, IsSource: true,
+		LastPromotedAt: "1756000000",
+	}
+	if primary.CanSetRoleTarget() {
+		t.Error("`target` is offered on a live primary that served live. The gate must read the record, " +
+			"not whether a decision is outstanding — this transition arms the next sync to overwrite it")
+	}
+	if primary.ServedLiveUnresolved() {
+		t.Error("ServedLiveUnresolved and the gates have been collapsed into one predicate")
+	}
+}
+
+// TestCanInvertAcceptsADemotedPeerThatServedLive is the other regression, and it
+// was a dead end: the engine's AssessInvert was relaxed to accept a promoted end
+// demoted to paused/fenced/target when it carries the record, and this predicate
+// was left requiring PeerRole == promoted.
+//
+// Every served-live refusal this console prints ends in "reverse the pair with
+// Invert", and every one of them fires on a peer that has been demoted — which
+// is what reaching for an inversion involves, since the copy gets shut down
+// first and that records `paused`. So the console recommended Invert, withheld
+// the button, and refused a hand-made POST.
+func TestCanInvertAcceptsADemotedPeerThatServedLive(t *testing.T) {
+	base := FailoverRow{
+		AgentID: "src", VM: "web01", IsSource: true,
+		PeerSeen: true, PeerHost: "hyper02p", PeerVM: "web01",
+	}
+
+	// Still promoted: the case that always worked.
+	promoted := base
+	promoted.PeerRole = store.RolePromoted
+	if !promoted.CanInvert() {
+		t.Fatal("a promoted peer is no longer invertible")
+	}
+
+	// The three demoted spellings the engine now accepts, each carrying the record.
+	for _, role := range []string{store.RolePaused, store.RoleFenced, store.RoleTarget} {
+		r := base
+		r.PeerRole = role
+		r.PeerLastPromotedAt = "1756000000"
+		if !r.CanInvert() {
+			t.Errorf("peer role %q with a promotion record is not invertible, but the engine accepts it — "+
+				"so the console recommends Invert in its refusal messages, withholds the button, and "+
+				"refuses the POST", role)
+		}
+	}
+
+	// Without the record it must stay refused: otherwise this offers to reverse
+	// a pair that was never failed over, which is the check's real job.
+	for _, role := range []string{store.RolePaused, store.RoleFenced, store.RoleTarget} {
+		r := base
+		r.PeerRole = role
+		if r.CanInvert() {
+			t.Errorf("peer role %q with NO promotion record was offered an inversion", role)
+		}
+	}
+
+	// A peer already marked source is a completed inversion (AssessInvert
+	// reports AlreadyInverted) or a half-inverted pair. Not this console's call.
+	srcPeer := base
+	srcPeer.PeerRole = store.RoleSource
+	srcPeer.PeerLastPromotedAt = "1756000000"
+	if srcPeer.CanInvert() {
+		t.Error("an inversion was offered against a peer already marked source")
+	}
+
+	// The unchanged requirements still hold.
+	for name, mutate := range map[string]func(*FailoverRow){
+		"has no agent":     func(r *FailoverRow) { r.AgentID = "" },
+		"is not a source":  func(r *FailoverRow) { r.IsSource = false },
+		"peer not reports": func(r *FailoverRow) { r.PeerSeen = false },
+	} {
+		r := base
+		r.PeerRole = store.RolePaused
+		r.PeerLastPromotedAt = "1756000000"
+		mutate(&r)
+		if r.CanInvert() {
+			t.Errorf("a row that %s was offered an inversion", name)
+		}
+	}
+}
+
+// TestThePeerColumnUsesTheResolvedRuleToo is the other row of the same defect,
+// and it was missed when the row's own pill was fixed.
+//
+// The page's warnings about a copy live on the row of its PEER, because the
+// controls they concern — Full resync, Force clean resync — are fired from the
+// source's row. So after a correct -invert the new REPLICA's row was rendering a
+// critical "has served live" pill and a release command aimed at the live
+// primary: unobeyable while it runs, harmful if obeyed, and never clearing.
+func TestThePeerColumnUsesTheResolvedRuleToo(t *testing.T) {
+	// The new replica's row, after a correct inversion: its peer is the primary.
+	replica := FailoverRow{
+		AgentID: "src", Hostname: "hyper01p", VM: "web01",
+		Role: store.RoleTarget, IsReplica: true,
+		PeerHost: "hyper02p", PeerVM: "web01", PeerSeen: true,
+		PeerRole: store.RoleSource, PeerActive: true,
+		PeerLastPromotedAt: "1756000000", PeerLastPromotedAtUnix: 1756000000,
+		PeerIsReplica: false, // the inversion cleared its replica_source
+	}
+	if !replica.PeerServedLive() {
+		t.Fatal("the gate lost sight of the record on the peer")
+	}
+	if replica.PeerServedLiveUnresolved() {
+		t.Error("the replica's row flags the live primary of a resolved pair as awaiting a decision, " +
+			"with a release command aimed at it")
+	}
+
+	// A peer still marked promoted: the pair is mid-failover, and the source's
+	// row must say so.
+	promotedPeer := replica
+	promotedPeer.PeerRole = store.RolePromoted
+	promotedPeer.PeerIsReplica = true
+	if promotedPeer.PeerServedLiveUnresolved() {
+		t.Error("a promoted peer is reported twice over; its own row says it in the present tense")
+	}
+
+	// The states that DO need saying, from the source's row.
+	for _, role := range []string{store.RolePaused, store.RoleFenced, store.RoleTarget} {
+		r := replica
+		r.PeerRole = role
+		r.PeerActive = false
+		r.PeerIsReplica = true
+		if !r.PeerServedLiveUnresolved() {
+			t.Errorf("peer role %q: the row that can discard this copy says nothing about it", role)
+		}
+	}
+
+	// A peer marked `source` that is STILL somebody's replica is -update-role
+	// source, not an inversion: nothing replicates between the two ends, and the
+	// warning must stay.
+	claimed := replica
+	claimed.PeerIsReplica = true
+	if !claimed.PeerServedLiveUnresolved() {
+		t.Error("a peer marked `source` that still records a replica_source went silent -- that is a " +
+			"hand-written claim, not a resolved pair")
+	}
+}
+
+// TestTheGatesStillReadPresenceOnThePeer: same split as on the row itself. The
+// resync controls must refuse a copy that served live whatever its role says,
+// including the primary of a fan-out.
+func TestTheGatesStillReadPresenceOnThePeer(t *testing.T) {
+	src := FailoverRow{
+		AgentID: "src", VM: "web01", IsSource: true,
+		PeerSeen: true, PeerHost: "hyper02p", PeerVM: "web01",
+		PeerRole: store.RoleSource, PeerLastPromotedAt: "1756000000", PeerIsReplica: false,
+	}
+	if src.PeerServedLiveUnresolved() {
+		t.Fatal("fixture is wrong: this peer is a resolved primary")
+	}
+	if src.CanReinit() || src.CanForceClean() {
+		t.Error("a full resync is offered into a copy that served live, because the gate was switched to " +
+			"the resolution rule. The gates must read presence: those disks held live data whatever " +
+			"role the domain carries now")
+	}
+}
+
+// TestAPromotedCopyStillGetsTheFullRemedy pins the distinction between the two
+// resolution predicates, because collapsing them is wrong in BOTH directions and
+// I got it wrong in both while fixing this.
+//
+//   - Suppressing the pill and the row warning for `promoted` is right: that row
+//     already says it in the present tense, in the role cell and the promoted-at
+//     line, so a second marker is noise on every failover.
+//   - Suppressing the REMEDY for `promoted` is wrong: a failover nobody has
+//     resolved yet is exactly when "invert if it stands, release it if the data is
+//     disposable" is the advice. Keying a refusal message or a withheld-control
+//     explanation on ServedLiveUnresolved told a domain mid-failover that it was
+//     already the primary of its pair and that nothing was outstanding.
+//
+// So the pill keys on ServedLiveUnresolved and the wording keys on
+// ServedLiveResolvedPrimary, and the two differ by exactly the promoted case.
+func TestAPromotedCopyStillGetsTheFullRemedy(t *testing.T) {
+	promoted := FailoverRow{
+		AgentID: "dr", VM: "web01", Role: store.RolePromoted, Active: true,
+		IsReplica: true, LastPromotedAt: "1756000000",
+		RestorePoints: []store.ReportRestorePoint{{Tag: "rp-1"}},
+	}
+	if promoted.ServedLiveUnresolved() {
+		t.Error("a promoted row carries the pill twice over")
+	}
+	if promoted.ServedLiveResolvedPrimary() {
+		t.Error("a promoted copy is reported as a resolved primary, so every refusal about it says " +
+			"nothing is outstanding — in the middle of an unresolved failover")
+	}
+
+	// The resolved primary is the only state where the remedy is withheld.
+	primary := promoted
+	primary.Role = store.RoleSource
+	primary.IsReplica = false
+	if !primary.ServedLiveResolvedPrimary() {
+		t.Error("the primary an -invert produced is not recognised as resolved")
+	}
+
+	// A `source` still recording a replica_source is a hand-written claim.
+	claimed := primary
+	claimed.IsReplica = true
+	if claimed.ServedLiveResolvedPrimary() {
+		t.Error("`-update-role source` on a promoted copy counts as a resolved inversion")
+	}
+	if !claimed.ServedLiveUnresolved() {
+		t.Error("and it went silent, which is how one command switches the alarm off on a pair that " +
+			"has stopped replicating in both directions")
+	}
+
+	// The peer-side pair behaves identically.
+	src := FailoverRow{
+		AgentID: "src", VM: "web01", IsSource: true, PeerSeen: true,
+		PeerRole: store.RolePromoted, PeerLastPromotedAt: "1756000000", PeerIsReplica: true,
+	}
+	if src.PeerServedLiveResolvedPrimary() {
+		t.Error("a promoted peer is reported as a resolved primary")
+	}
+	src.PeerRole = store.RoleSource
+	src.PeerIsReplica = false
+	if !src.PeerServedLiveResolvedPrimary() {
+		t.Error("the peer an -invert made the primary is not recognised as resolved")
+	}
+}
+
+// --- the live promoted copy (CI-36) ---------------------------------------
+
+// TestCanSetRoleToNarrowsOnALivePromotedRow is clause 4 of CI-36, resolved
+// against clause 3 rather than taken literally.
+//
+// The audit asked for "no set-role on active promoted rows". Removing it
+// outright would close the escape hatch on the one row where `source` — keep
+// this copy, lose nothing — is the documented remedy, and that remedy is what
+// every served-live refusal points at. So the menu narrows to exactly that one
+// value instead, which satisfies what the clause was for: no casual relabelling
+// of a live copy.
+func TestCanSetRoleToNarrowsOnALivePromotedRow(t *testing.T) {
+	live := FailoverRow{
+		AgentID: "dr", VM: "web01", Hostname: "hyper02p",
+		Role: store.RolePromoted, Active: true, IsReplica: true,
+		LastPromotedAt: "1756000000",
+	}
+	if !live.IsLivePromoted() {
+		t.Fatal("fixture is not a live promoted row")
+	}
+	if !live.CanSetRole() {
+		t.Error("the set-role control is withheld entirely, which closes the only way to keep this copy")
+	}
+	if !live.CanSetRoleTo(store.RoleSource) {
+		t.Error("`source` is withheld from a live promoted copy. It is the one value still true of a " +
+			"running copy, and the only route that loses no data")
+	}
+	for _, role := range []string{store.RoleTarget, store.RolePaused} {
+		if live.CanSetRoleTo(role) {
+			t.Errorf("%q is offered on a live promoted row. The engine refuses it — it would record that "+
+				"something else is the live copy while this one takes writes, and drop the fence", role)
+		}
+	}
+
+	// Once it is stopped, the ordinary rules apply again: `paused` is back, and
+	// `target` stays withheld only because of the promotion record.
+	stopped := live
+	stopped.Active = false
+	if !stopped.CanSetRoleTo(store.RolePaused) {
+		t.Error("a STOPPED promoted copy cannot be paused, which breaks the documented shutdown-then-record flow")
+	}
+	if stopped.CanSetRoleTo(store.RoleTarget) {
+		t.Error("`target` is offered on a copy that served live")
+	}
+	released := stopped
+	released.LastPromotedAt = ""
+	if !released.CanSetRoleTo(store.RoleTarget) {
+		t.Error("`target` stays withheld after the promotion record is released")
+	}
+
+	// An ordinary running replica is untouched by any of this.
+	replica := FailoverRow{AgentID: "dr", VM: "web01", Role: store.RoleTarget, Active: true, IsReplica: true}
+	for _, role := range []string{store.RoleTarget, store.RoleSource, store.RolePaused} {
+		if !replica.CanSetRoleTo(role) {
+			t.Errorf("%q was withheld from an ordinary running replica", role)
+		}
+	}
+}
+
+// TestNeedsTypedConfirmationIsExactlyTheLivePromotedRow: clause 3's scope. The
+// rest of the page stays one click, because the rest of the page is undoable.
+func TestNeedsTypedConfirmationIsExactlyTheLivePromotedRow(t *testing.T) {
+	base := FailoverRow{AgentID: "dr", VM: "web01", IsReplica: true}
+	for _, tc := range []struct {
+		role   string
+		active bool
+		want   bool
+	}{
+		{store.RolePromoted, true, true},
+		{store.RolePromoted, false, false}, // already stopped: nothing live to lose
+		{store.RoleTarget, true, false},
+		{store.RolePaused, false, false},
+		{store.RoleSource, true, false}, // a production source, but shutting it down is the planned-failover step
+	} {
+		r := base
+		r.Role, r.Active = tc.role, tc.active
+		if got := r.NeedsTypedConfirmation(); got != tc.want {
+			t.Errorf("role=%q active=%v: NeedsTypedConfirmation()=%v want %v", tc.role, tc.active, got, tc.want)
+		}
+	}
+}

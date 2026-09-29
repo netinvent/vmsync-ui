@@ -67,14 +67,17 @@
                  and figure on this row stays exactly as it was. This is the
                  only mark that the disks changed underneath them. */}}
             {{if .ReplicaPartial}}<span class="pill s-crit">partial copy</span>{{end}}
-            {{/* Only once the role has stopped saying it. While a domain reads
-                 `promoted` the row already says so in the present tense, in the
-                 role cell and in the promoted-at line below; a second pill
-                 there would be noise on every failover. The pill earns its
-                 place in the state AFTER that -- shut down, recorded `paused`,
-                 promotion record erased -- which is the state where this is the
-                 only mark on the row that the disks hold live data. */}}
-            {{if and .ServedLive (ne .Role "promoted")}}<span class="pill s-warn">has served live</span>{{end}}
+            {{/* Only while a decision is actually outstanding -- see
+                 ServedLiveUnresolved, which excludes `promoted` (the row already
+                 says so in the present tense, in the role cell and the
+                 promoted-at line below) and `source` (the primary an inversion
+                 produced: that pair is resolved, and marking the live primary as
+                 undecided was a real defect in this pill's first version). The
+                 pill earns its place in the state between those two -- shut
+                 down, recorded `paused`, promotion record erased -- which is
+                 where it is the only mark on the row that the disks hold live
+                 data. */}}
+            {{if .ServedLiveUnresolved}}<span class="pill s-warn">has served live</span>{{end}}
             {{if .Active}}<span class="pill s-ok">running</span>{{else}}<span class="pill s-none">stopped</span>{{end}}
             <div class="warnline">{{.Hostname}}</div>
             {{if .AgentStale}}<div class="warnline">agent stale — an action will not arrive until it checks in</div>{{end}}
@@ -100,11 +103,14 @@
                 rather than known good, and nothing afterwards says it ever failed.
               </div>
             {{end}}
-            {{/* The counterpart of the pill above, and the same condition: only
-                 once the role has stopped saying it. This is the row's own
-                 explanation of a refusal an operator will otherwise meet as a
-                 bare error from three different controls. */}}
-            {{if and .ServedLive (ne .Role "promoted")}}
+            {{/* The counterpart of the pill above, and the same condition. This
+                 is the row's own explanation of a refusal an operator will
+                 otherwise meet as a bare error from three different controls --
+                 which is also why it must not appear where no refusal is
+                 outstanding: on the primary an inversion produced it read as a
+                 standing instruction to release the live copy, and following it
+                 would have stripped the guard. */}}
+            {{if .ServedLiveUnresolved}}
               <div class="warnline">
                 <strong>HAS SERVED LIVE — these disks held production data.</strong>
                 {{.VM}} was promoted on {{.ServedLiveAt}} and has not been released, so what is on
@@ -257,7 +263,33 @@
                    production data is the row that says nothing about it --
                    the record lives on the peer, and the peer's own role was
                    rewritten the moment it was shut down. */}}
-              {{if .PeerServedLive}}
+              {{/* PeerServedLiveUnresolved, not PeerServedLive: the same
+                   distinction the row's own pill makes, and missing it here left
+                   this block rendering on the REPLICA's row of every inverted
+                   pair — a critical pill and a release command aimed at the live
+                   primary, which cannot be obeyed while it runs and must not be
+                   obeyed at all. The controls this text explains
+                   (CanReinit/CanForceClean) still read presence, because they
+                   are gates. */}}
+              {{/* A peer that is promoted RIGHT NOW. Its own block, before the
+                   served-live one, because the statement is sharper and the
+                   remedy is different -- the failover is in force, so Invert
+                   keeps the data and nothing needs releasing. It is also the one
+                   case that speaks for a peer carrying no durable record, which
+                   is a domain promoted by a build that predated the field. */}}
+              {{if eq .PeerRole "promoted"}}
+                <span class="pill s-crit">promoted — live</span>
+                <div class="warnline">
+                  this replica is <strong>the live copy of a failover</strong>: it is marked
+                  <em>promoted</em>{{if .PeerActive}} and running{{end}}, so its disks are what that
+                  failover produced and may be the only copy of that data. <em>Full resync</em> is not
+                  offered below, and <em>force clean</em> no longer overrides this either.
+                  If the failover stands, <em>Invert</em> reverses the pair and keeps it. If that copy
+                  really is disposable, stop it, demote it and release the promotion on
+                  {{.PeerHost}} first.
+                </div>
+              {{end}}
+              {{if .PeerServedLiveUnresolved}}
                 <span class="pill s-crit">has served live</span>
                 <div class="warnline">
                   this replica <strong>has served live</strong>: it was promoted on
@@ -404,10 +436,59 @@
               <input type="hidden" name="peer_host" value="{{.PeerHost}}">
               <input type="hidden" name="peer_vm" value="{{.PeerVM}}">
               <button>Invert — make {{.PeerRef}} the source</button>
+              {{/* Offered on a peer that is no longer marked promoted, which is
+                   the normal state by the time anybody reaches for this: the
+                   copy gets shut down first, and that records `paused`. Said out
+                   loud because a button whose peer reads `paused` looks like a
+                   mistake otherwise, and because this is the remedy every
+                   served-live refusal on the other row points at. */}}
+              {{if and .PeerServedLive (ne .PeerRole "promoted")}}
+              <div class="note">
+                {{.PeerRef}} reads <em>{{.PeerRole}}</em> rather than <em>promoted</em> because it has
+                already been shut down or fenced, which erases the promotion record. It still carries
+                the durable record that it served live, and that is what makes this inversion valid —
+                it keeps that copy's data and makes it the source. This is the remedy the
+                <em>has served live</em> warning on its own row points at.
+              </div>
+              {{end}}
             </form>
             {{end}}
 
             {{if .CanShutdown}}
+            {{/* One click everywhere except on the live promoted copy, where the
+                 button stops the machine that is serving production and the role
+                 write that follows discards the fence against its returning
+                 source. Neither is undoable from this page, and neither this
+                 button's label nor its neighbours' say which VM or host they are
+                 about -- on an estate-wide list that is the whole risk. The
+                 confirmation is enforced server-side in refuseIneligible; this is
+                 only where it is asked for. */}}
+            {{if .NeedsTypedConfirmation}}
+            <details class="act">
+              <summary>Shut down cleanly…</summary>
+              <form method="post" action="/failover/operation" class="inline">
+                <input type="hidden" name="csrf" value="{{$user.CSRF}}">
+                <input type="hidden" name="kind" value="shutdown-domain">
+                <input type="hidden" name="agent_id" value="{{.AgentID}}">
+                <input type="hidden" name="vm" value="{{.VM}}">
+                <div class="warnline">
+                  <strong>{{.VM}} on {{.Hostname}} is serving production right now.</strong>
+                  Stopping it takes the workload down.
+                  {{if .ArmedFenceSource}}
+                    The role written afterwards also discards the fence that authorises stopping
+                    {{.ArmedFenceSource}} if it comes back — no role change restores that token, so
+                    re-arming means <code>-update-role promoted</code> and then
+                    <code>-promote -fence-source</code>.
+                  {{end}}
+                </div>
+                <label class="cell">
+                  <span>type <strong>{{.VM}}</strong> to confirm</span>
+                  <input name="confirm_vm" autocomplete="off" required>
+                </label>
+                <button class="danger">Shut down {{.VM}} on {{.Hostname}}</button>
+              </form>
+            </details>
+            {{else}}
             <form method="post" action="/failover/operation" class="inline">
               <input type="hidden" name="csrf" value="{{$user.CSRF}}">
               <input type="hidden" name="kind" value="shutdown-domain">
@@ -416,21 +497,39 @@
               <button class="danger">Shut down cleanly</button>
             </form>
             {{end}}
+            {{end}}
 
             {{/* Not "no restore points" and not silence: a row whose rollback
                  is withheld because the copy served live needs to say so, and
                  needs to say what clears it. The condition is checked against
                  restore points existing so this does not appear on the many
                  rows that simply have nothing to roll back to. */}}
+            {{/* Two halves, with two different conditions, because the gate and
+                 the remedy are different questions. The WITHHOLDING is keyed on
+                 ServedLive, matching CanRestore, so it is explained on a primary
+                 too. The REMEDY is keyed on ServedLiveResolvedPrimary: telling
+                 the live primary of a resolved pair to invert or release itself
+                 is the standing-instruction defect again. NOT on
+                 ServedLiveUnresolved, which also excludes `promoted` -- a
+                 promoted copy is precisely when "invert, or release it" is the
+                 advice, and suppressing it there would tell a domain mid-failover
+                 that it was already somebody's primary. */}}
             {{if and .ServedLive .RestorePoints}}
             <div class="warnline">
-              <strong>Roll back is not offered:</strong> {{.VM}} was promoted on {{.ServedLiveAt}}
-              and has not been released, so its disks may hold the only copy of the data that was
-              serving then — a rollback would overwrite it with an older replica. Every other trace
-              of that failover went when its role changed, which is why the rest of this row looks
-              ordinary. If the failover stands, <em>Invert</em> keeps this data. If it really is
-              disposable, run this on {{.Hostname}}:
-              <code>{{.ReleaseCommand}}</code>
+              <strong>Roll back is not offered:</strong> {{.VM}} was promoted on {{.ServedLiveAt}},
+              so its disks have held data that was serving and a rollback would overwrite it with an
+              older replica.
+              {{if not .ServedLiveResolvedPrimary}}
+                That promotion has not been released, and every other trace of it went when the role
+                changed — which is why the rest of this row looks ordinary. If the failover stands,
+                <em>Invert</em> keeps this data. If it really is disposable, run this on
+                {{.Hostname}}:
+                <code>{{.ReleaseCommand}}</code>
+              {{else}}
+                This copy is now the <strong>primary</strong> of its pair, so nothing is outstanding —
+                the record is kept deliberately, and it is what refuses turning this domain back into
+                a replica.
+              {{end}}
             </div>
             {{end}}
 
@@ -566,22 +665,68 @@
                          in the menu would only mean an operator discovers that
                          by choosing it. `source` and `paused` stay: they
                          destroy nothing, and the escape hatch must not close. */}}
-                    {{if .CanSetRoleTarget}}
+                    {{if .CanSetRoleTo "target"}}
                     <option value="target">target — a normal replica again</option>
                     {{end}}
+                    {{if .CanSetRoleTo "source"}}
                     <option value="source">source — the primary of its pair</option>
+                    {{end}}
+                    {{if .CanSetRoleTo "paused"}}
                     <option value="paused">paused — replication suspended</option>
+                    {{end}}
                   </select>
                 </label>
-                <button>Set role</button>
-                {{if not .CanSetRoleTarget}}
+                {{/* On a live promoted row the menu above is down to `source`
+                     alone, and this is where the operator has to say which VM
+                     they mean. Same guard as the shutdown control and enforced in
+                     the same place; see NeedsTypedConfirmation. */}}
+                {{if .NeedsTypedConfirmation}}
+                <div class="warnline">
+                  <strong>{{.VM}} on {{.Hostname}} is serving production right now.</strong>
+                  Only <em>source</em> is offered, and it is the one value still true of a running
+                  copy: it says this copy is the authoritative one, which is what <em>promoted</em>
+                  already says. It keeps the data{{if .ArmedFenceSource}}, and it keeps the fence
+                  armed against {{.ArmedFenceSource}}, because that arrangement is still in
+                  force{{end}}. Everything else would record that something else is the live copy
+                  while this one is taking writes{{if .ArmedFenceSource}} and would discard that
+                  fence{{end}} — vmsync refuses those outright.
+                  <br>
+                  It rewrites <strong>this end only</strong>:
+                  {{if .PeerRef}}{{.PeerRef}}{{else}}the domain this copy displaced{{end}} still
+                  records itself as a source, so nothing replicates either way until the pair is
+                  finished with <em>Invert</em> on that end's row. The fleet keeps reporting it as
+                  unresolved until then, deliberately.
+                </div>
+                <label class="cell">
+                  <span>type <strong>{{.VM}}</strong> to confirm</span>
+                  <input name="confirm_vm" autocomplete="off" required>
+                </label>
+                {{end}}
+                <button>{{if .NeedsTypedConfirmation}}Set {{.VM}} on {{.Hostname}} to source{{else}}Set role{{end}}</button>
+                {{/* Same split as the rollback note: the withholding is true on
+                     a primary and is explained there, the remedy is not. */}}
+                {{/* .ServedLive as well as the predicate, because CanSetRoleTarget
+                     is now false for TWO reasons: the promotion record, and the
+                     row being a live promoted copy. Keyed on the predicate alone,
+                     this text fired on a live promoted row that carries no record
+                     at all -- the legacy population, and the unmodified test
+                     fixture -- and invented both a promotion time ("an unrecorded
+                     time") and an unreleased promotion, then printed a release
+                     command that refuses a running domain. The live-promoted case
+                     is explained by the confirmation block below instead. */}}
+                {{if and (not .CanSetRoleTarget) .ServedLive}}
                 <div class="warnline">
                   <strong><em>target</em> is not offered:</strong> {{.VM}} was promoted on
-                  {{.ServedLiveAt}} and has not been released. Making it a replication target again
-                  would arm the next scheduled sync to overwrite data that was serving live, and
-                  vmsync refuses it. <em>source</em> makes this copy the primary and keeps the data;
-                  if it really is disposable, run this on {{.Hostname}}:
-                  <code>{{.ReleaseCommand}}</code>
+                  {{.ServedLiveAt}}. Making it a replication target again would arm the next
+                  scheduled sync to overwrite data that was serving live, and vmsync refuses it.
+                  {{if not .ServedLiveResolvedPrimary}}
+                    That promotion has not been released. <em>source</em> makes this copy the primary
+                    and keeps the data; if it really is disposable, run this on {{.Hostname}}:
+                    <code>{{.ReleaseCommand}}</code>
+                  {{else}}
+                    This copy is already the primary of its pair, and the record is what keeps it
+                    from being turned back into a replica.
+                  {{end}}
                 </div>
                 {{end}}
                 <div class="note">
