@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"time"
 	"vmsync-ui/internal/auth"
 	"vmsync-ui/internal/store"
 )
@@ -47,7 +48,7 @@ func failoverFixture() ([]store.Agent, map[string]store.Report) {
 	}
 	reports := map[string]store.Report{
 		"src": {
-			Hostname: "hyper01p",
+			Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30,
 			Domains: []store.ReportDomain{
 				// Still running, and its target has been promoted: the
 				// split brain this page exists to resolve.
@@ -95,7 +96,7 @@ func failoverFixture() ([]store.Agent, map[string]store.Report) {
 			},
 		},
 		"dr": {
-			Hostname: "hyper02p",
+			Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30,
 			Domains: []store.ReportDomain{
 				{
 					Name: "web01", Active: true, Role: store.RolePromoted,
@@ -707,11 +708,11 @@ func partialCopyFixture(raw string) ([]store.Agent, map[string]store.Report) {
 		{ID: "dr", Hostname: "hyper02p", LastSeenAt: now.Unix() - 30},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", Active: true, Role: store.RoleSource, ReplicaTargets: []string{"hyper02p:db01"}},
 			{Name: "web01", Active: true, Role: store.RoleSource, ReplicaTargets: []string{"hyper02p:web01"}},
 		}},
-		"dr": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+		"dr": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			// Reads healthy by everything else on the row: a recent
 			// checkpoint and a recent sync, both written by the run BEFORE
 			// the one that died.
@@ -2213,16 +2214,16 @@ func TestAFanOutSourceIsAboutTheCopyThatServed(t *testing.T) {
 		{ID: "dr2", Hostname: "dr02", LastSeenAt: now.Unix() - 30},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{{
 			Name: "web01", Active: false, Role: store.RoleSource,
 			// dr01 first, deliberately: it is the healthy one, and it is what
 			// targets[0] would have selected.
 			ReplicaTargets: []string{"dr01:web01", "dr02:web01"},
 		}}},
-		"dr1": {Hostname: "dr01", Domains: []store.ReportDomain{{
+		"dr1": {Hostname: "dr01", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{{
 			Name: "web01", Active: false, Role: store.RoleTarget, ReplicaSource: "hyper01p:web01",
 		}}},
-		"dr2": {Hostname: "dr02", Domains: []store.ReportDomain{{
+		"dr2": {Hostname: "dr02", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{{
 			Name: "web01", Active: false, Role: store.RolePaused, ReplicaSource: "hyper01p:web01",
 			LastPromotedAt: "1756000000", LastPromotedAtUnix: 1756000000,
 		}}},
@@ -2265,11 +2266,11 @@ func TestAnInvertedPairRendersNoStandingReleaseInstruction(t *testing.T) {
 		{ID: "dr", Hostname: "hyper02p", LastSeenAt: now.Unix() - 30},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{{
 			Name: "web01", Active: false, Role: store.RoleTarget,
 			ReplicaSource: "hyper02p:web01", LastSyncUnix: now.Unix() - 300,
 		}}},
-		"dr": {Hostname: "hyper02p", Domains: []store.ReportDomain{{
+		"dr": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{{
 			Name: "web01", Active: true, Role: store.RoleSource,
 			ReplicaTargets: []string{"hyper01p:web01"},
 			// Kept by the inversion on purpose; replica_source cleared by it.
@@ -2508,5 +2509,69 @@ func TestTheLivePromotedRowRendersTruthfully(t *testing.T) {
 	drill := rowFor(t, v, "hyper02p", "app01")
 	if drill.ArmedFenceSource != "" {
 		t.Fatalf("fixture drifted: app01 should model a promotion that armed nothing")
+	}
+}
+
+// A PEER THAT GOES QUIET MUST NOT MAKE A SPLIT BRAIN LOOK RESOLVED.
+//
+// The index this page is built from keeps each agent's LAST report however
+// old it is, so PeerSeen stays true and the row went on asserting "both
+// copies are running" from a report taken before the partition. The
+// dashboard's Pair type has split these two states since it was written --
+// "dropping it would claim a dead source as fact when all that is actually
+// known is silence" -- and this is the same question asked from the other
+// end of the pair.
+func TestAStaleePeerIsReportedAsUncertainNotAsFact(t *testing.T) {
+	agents, reports := failoverFixture()
+
+	// The peer's host stops reporting. Its last report still says the
+	// promoted copy was running, because that is the last thing it said.
+	dr := reports["dr"]
+	dr.ReportedAtUnix = now.Unix() - int64((staleAfter + time.Minute).Seconds())
+	reports["dr"] = dr
+
+	v := BuildFailoverView(agents, reports, nil, now)
+
+	if v.SplitBrainCount != 0 {
+		t.Errorf("SplitBrainCount = %d from a report %v old; the page states as fact something it last observed before the peer went quiet",
+			v.SplitBrainCount, staleAfter+time.Minute)
+	}
+	if v.SplitBrainPossibleCount == 0 {
+		t.Error("the pair vanished from both counts when the peer went quiet. Silence is exactly what a partition looks like from this side, and a partition is how the second copy came to be promoted -- this is the one case that must not go quiet with it")
+	}
+
+	// It must still be at the top of the page: what is uncertain is only
+	// whether the second copy is STILL running.
+	if len(v.Operations) == 0 && len(v.Rows) == 0 {
+		t.Fatal("no rows")
+	}
+	var found bool
+	for _, r := range v.Rows {
+		if r.SplitBrainPossible() {
+			found = true
+			if !r.NeedsDecision() {
+				t.Error("a possible split brain is not ranked as needing a decision, so it sorts below quiet rows")
+			}
+			if r.PeerLastSeen() == "never" {
+				t.Error("the row cannot say how long ago the peer was heard from, which is the one fact that makes the uncertainty actionable")
+			}
+		}
+	}
+	if !found {
+		t.Error("no row reports the uncertain state")
+	}
+}
+
+// ...and a peer that IS reporting still produces a plain, certain split
+// brain. The freshness check must not turn every alarm into a maybe.
+func TestAFreshPeerStillGivesACertainSplitBrain(t *testing.T) {
+	agents, reports := failoverFixture()
+
+	v := BuildFailoverView(agents, reports, nil, now)
+	if v.SplitBrainCount == 0 {
+		t.Error("a running source whose promoted target reported seconds ago is not a certain split brain; the freshness check has swallowed the alarm it was meant to qualify")
+	}
+	if v.SplitBrainPossibleCount != 0 {
+		t.Errorf("SplitBrainPossibleCount = %d for a freshly reported peer; the two states must be exclusive or the page double-counts", v.SplitBrainPossibleCount)
 	}
 }

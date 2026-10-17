@@ -380,11 +380,11 @@ func TestScheduleListsSourcesOnly(t *testing.T) {
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}},
 			{Name: "scratch01"}, // no metadata at all: nothing to replicate to
 		}},
-		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "web01", ReplicaSource: "hyper01p:web01"},
 		}},
 	}
@@ -403,7 +403,7 @@ func TestScheduleListsSourcesOnly(t *testing.T) {
 
 func TestScheduleRowCarriesItsEntryAndDefaults(t *testing.T) {
 	agents := []store.Agent{{ID: "a1", Hostname: "h1", LastSeenAt: now.Unix()}}
-	reports := map[string]store.Report{"a1": {Hostname: "h1", Domains: []store.ReportDomain{
+	reports := map[string]store.Report{"a1": {Hostname: "h1", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 		{Name: "sched", ReplicaTargets: []string{"h2:sched"}},
 		{Name: "unsched", ReplicaTargets: []string{"h2:unsched"}},
 	}}}
@@ -448,7 +448,7 @@ func TestScheduleRowCarriesItsEntryAndDefaults(t *testing.T) {
 // are already handled.
 func TestScheduleSortsUnscheduledFirst(t *testing.T) {
 	agents := []store.Agent{{ID: "a1", Hostname: "h1", LastSeenAt: now.Unix()}}
-	reports := map[string]store.Report{"a1": {Hostname: "h1", Domains: []store.ReportDomain{
+	reports := map[string]store.Report{"a1": {Hostname: "h1", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 		{Name: "aaa-scheduled", ReplicaTargets: []string{"h2:aaa"}},
 		{Name: "zzz-unscheduled", ReplicaTargets: []string{"h2:zzz"}},
 	}}}
@@ -468,8 +468,8 @@ func TestScheduleMarksStaleAgents(t *testing.T) {
 		{ID: "a2", Hostname: "h2", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"a1": {Hostname: "h1", Domains: []store.ReportDomain{{Name: "v1", ReplicaTargets: []string{"x:v1"}}}},
-		"a2": {Hostname: "h2", Domains: []store.ReportDomain{{Name: "v2", ReplicaTargets: []string{"x:v2"}}}},
+		"a1": {Hostname: "h1", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{{Name: "v1", ReplicaTargets: []string{"x:v1"}}}},
+		"a2": {Hostname: "h2", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{{Name: "v2", ReplicaTargets: []string{"x:v2"}}}},
 	}
 	v := BuildScheduleView(agents, reports, nil, store.DefaultSettings(), now)
 	for _, r := range v.Rows {
@@ -487,7 +487,7 @@ func TestScheduleSkipsRevokedAndSilentAgents(t *testing.T) {
 		{ID: "gone", Hostname: "h1", LastSeenAt: now.Unix(), Revoked: true},
 		{ID: "quiet", Hostname: "h2", LastSeenAt: now.Unix()}, // enrolled, never reported
 	}
-	reports := map[string]store.Report{"gone": {Hostname: "h1", Domains: []store.ReportDomain{
+	reports := map[string]store.Report{"gone": {Hostname: "h1", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 		{Name: "v1", ReplicaTargets: []string{"x:v1"}},
 	}}}
 	v := BuildScheduleView(agents, reports, nil, store.DefaultSettings(), now)
@@ -502,8 +502,8 @@ func TestScheduleSkipsRevokedAndSilentAgents(t *testing.T) {
 func TestScheduleRowShowsTheLatestRun(t *testing.T) {
 	agents := []store.Agent{{ID: "a1", Hostname: "h1", LastSeenAt: now.Unix()}}
 	reports := map[string]store.Report{"a1": {
-		Hostname: "h1",
-		Domains:  []store.ReportDomain{{Name: "web01", ReplicaTargets: []string{"h2:web01"}}},
+		Hostname: "h1", ReportedAtUnix: now.Unix() - 30,
+		Domains: []store.ReportDomain{{Name: "web01", ReplicaTargets: []string{"h2:web01"}}},
 		Syncs: []store.SyncResult{
 			{VM: "web01", StartedAtUnix: now.Unix() - 7200, ExitCode: exit(0)},
 			{VM: "web01", StartedAtUnix: now.Unix() - 60, ExitCode: exit(1), Error: "ssh: connect refused"},
@@ -526,7 +526,7 @@ func TestScheduleRowShowsTheLatestRun(t *testing.T) {
 // the rendered text quietly reverses parts of the list.
 func TestBuildRunViewOrdersByRealTime(t *testing.T) {
 	agents := []store.Agent{{ID: "a1", Hostname: "h1", LastSeenAt: now.Unix()}}
-	reports := map[string]store.Report{"a1": {Hostname: "h1", Syncs: []store.SyncResult{
+	reports := map[string]store.Report{"a1": {Hostname: "h1", ReportedAtUnix: now.Unix() - 30, Syncs: []store.SyncResult{
 		{VM: "ten", StartedAtUnix: now.Unix() - 600, ExitCode: exit(0)},
 		{VM: "two", StartedAtUnix: now.Unix() - 120, ExitCode: exit(0)},
 		{VM: "hour", StartedAtUnix: now.Unix() - 3600, ExitCode: exit(0)},
@@ -546,7 +546,7 @@ func TestBuildRunViewCarriesTheFailureReason(t *testing.T) {
 	// A failure with no reason on the row sends the operator to a
 	// hypervisor's journal, which is what this console exists to avoid.
 	agents := []store.Agent{{ID: "a1", Hostname: "h1", LastSeenAt: now.Unix()}}
-	reports := map[string]store.Report{"a1": {Hostname: "h1", Syncs: []store.SyncResult{
+	reports := map[string]store.Report{"a1": {Hostname: "h1", ReportedAtUnix: now.Unix() - 30, Syncs: []store.SyncResult{
 		{VM: "ok", StartedAtUnix: now.Unix(), ExitCode: exit(0), LogTail: "done\n"},
 		{VM: "bad", StartedAtUnix: now.Unix() - 10, ExitCode: exit(1),
 			Error: "exit status 1", LogTail: "connecting\nfatal: target disk is smaller than source\n"},
@@ -575,7 +575,7 @@ func TestBuildRunViewHonoursTheLimit(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		syncs = append(syncs, store.SyncResult{VM: "v", StartedAtUnix: now.Unix() - int64(i)})
 	}
-	reports := map[string]store.Report{"a1": {Hostname: "h1", Syncs: syncs}}
+	reports := map[string]store.Report{"a1": {Hostname: "h1", ReportedAtUnix: now.Unix() - 30, Syncs: syncs}}
 
 	if got := len(BuildRunView(agents, reports, now, 3)); got != 3 {
 		t.Errorf("got %d rows with limit 3, want 3", got)
@@ -786,7 +786,7 @@ func sectionAfter(html, heading string) string {
 func TestDefaultCoveredVMIsNotReportedAsUnscheduled(t *testing.T) {
 	agents := []store.Agent{{ID: "a1", Hostname: "hv01", LastSeenAt: now.Unix()}}
 	reports := map[string]store.Report{"a1": {
-		Hostname: "hv01",
+		Hostname: "hv01", ReportedAtUnix: now.Unix() - 30,
 		Domains: []store.ReportDomain{
 			{Name: "mail01", ReplicaTargets: []string{"dr01"}},
 			{Name: "lab01", ReplicaTargets: []string{"dr01"}},
@@ -853,10 +853,10 @@ func TestMonitorAgentVMsAreNotCountedAsUnscheduled(t *testing.T) {
 		{ID: "a2", Hostname: "hv02", LastSeenAt: now.Unix(), Mode: store.AgentModeControlled},
 	}
 	reports := map[string]store.Report{
-		"a1": {Hostname: "hv01", Mode: store.AgentModeMonitor, Domains: []store.ReportDomain{
+		"a1": {Hostname: "hv01", ReportedAtUnix: now.Unix() - 30, Mode: store.AgentModeMonitor, Domains: []store.ReportDomain{
 			{Name: "cron01", ReplicaTargets: []string{"dr01"}},
 		}},
-		"a2": {Hostname: "hv02", Mode: store.AgentModeControlled, Domains: []store.ReportDomain{
+		"a2": {Hostname: "hv02", ReportedAtUnix: now.Unix() - 30, Mode: store.AgentModeControlled, Domains: []store.ReportDomain{
 			{Name: "run01", ReplicaTargets: []string{"dr01"}},
 		}},
 	}
@@ -901,8 +901,8 @@ func TestMonitorAgentVMsAreNotCountedAsUnscheduled(t *testing.T) {
 func TestAnAgentThatNeverStatedItsModeIsNotTreatedAsReadOnly(t *testing.T) {
 	agents := []store.Agent{{ID: "a1", Hostname: "hv01", LastSeenAt: now.Unix()}}
 	reports := map[string]store.Report{"a1": {
-		Hostname: "hv01",
-		Domains:  []store.ReportDomain{{Name: "vm01", ReplicaTargets: []string{"dr01"}}},
+		Hostname: "hv01", ReportedAtUnix: now.Unix() - 30,
+		Domains: []store.ReportDomain{{Name: "vm01", ReplicaTargets: []string{"dr01"}}},
 	}}
 	view := BuildScheduleView(agents, reports, map[string][]store.ScheduleEntry{},
 		store.DefaultSettings(), now)

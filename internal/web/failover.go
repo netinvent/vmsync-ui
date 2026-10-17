@@ -65,6 +65,17 @@ type FailoverRow struct {
 	PeerSeen   bool
 	PeerRole   string
 	PeerActive bool
+	// PeerReportAgeSeconds is how old the report PeerActive came from is,
+	// or -1 when the peer has never reported.
+	//
+	// PeerSeen alone says an enrolled agent exists for that host and has
+	// reported at some point -- it does not say when. The index this row is
+	// built from keeps each agent's LAST report regardless of age, so
+	// without this the page asserted "both copies are running" from a
+	// report that might be hours old, at exactly the moment a partition
+	// made it stale. The dashboard's Pair type has drawn this distinction
+	// since it was written; see SplitBrainPossible in view.go.
+	PeerReportAgeSeconds int64
 	// PeerVerifyState is the peer's own recorded verification failure, and
 	// it is carried here because the controls that act on such a finding are
 	// on the SOURCE's row rather than on the replica's: CanReinit and
@@ -731,10 +742,58 @@ func (r FailoverRow) CanForceClean() bool {
 	return r.CanReinit()
 }
 
-// SplitBrain is this row's own half of the condition the dashboard reports:
-// this domain is running, and a promoted copy of it is running elsewhere.
-func (r FailoverRow) SplitBrain() bool {
+// PeerFresh reports whether anybody has heard from the peer's host
+// recently enough to treat what it said as current.
+//
+// Same rule and same threshold as the dashboard's SourceFresh, because it
+// is the same question asked from the other end of the pair.
+func (r FailoverRow) PeerFresh() bool {
+	return r.PeerSeen && r.PeerReportAgeSeconds >= 0 &&
+		time.Duration(r.PeerReportAgeSeconds)*time.Second <= staleAfter
+}
+
+// splitBrainShape is the observation both split-brain predicates rest on:
+// this domain is running, and the last thing heard about a promoted copy of
+// it was that it was running too.
+func (r FailoverRow) splitBrainShape() bool {
 	return r.Active && r.PeerSeen && r.PeerRole == store.RolePromoted && r.PeerActive
+}
+
+// SplitBrain is this row's own half of the condition the dashboard reports:
+// this domain is running, and a promoted copy of it is running elsewhere --
+// and the peer said so recently enough for it to still be a fact.
+//
+// FRESHNESS IS PART OF THE CLAIM. The index behind this page keeps each
+// agent's last report however old it is, so without the check this said
+// "both copies are running" on the strength of a report from before the
+// partition. The dashboard has split these two states since it was written
+// and gives the reason at SplitBrainPossible: "dropping it would claim a
+// dead source as fact when all that is actually known is silence". The same
+// is true read from this side.
+func (r FailoverRow) SplitBrain() bool {
+	return r.splitBrainShape() && r.PeerFresh()
+}
+
+// SplitBrainPossible is the honest middle state, matching the dashboard's:
+// the shape is there, but nobody has heard from the peer recently enough to
+// say whether it is still true.
+//
+// Reported separately and more quietly. Merging it into SplitBrain would
+// cry wolf on every pair whose peer agent is briefly behind; dropping it
+// would hide the one case that matters most, because a peer going quiet is
+// exactly what a partition looks like from here -- and a partition is how
+// the second copy came to be promoted in the first place.
+func (r FailoverRow) SplitBrainPossible() bool {
+	return r.splitBrainShape() && !r.PeerFresh()
+}
+
+// PeerLastSeen renders how long ago the peer's state was observed, for the
+// uncertain case above.
+func (r FailoverRow) PeerLastSeen() string {
+	if !r.PeerSeen || r.PeerReportAgeSeconds < 0 {
+		return "never"
+	}
+	return humanAge(time.Duration(r.PeerReportAgeSeconds) * time.Second)
 }
 
 // NeedsDecision marks the rows this page exists for, which is what puts them
@@ -750,7 +809,8 @@ func (r FailoverRow) SplitBrain() bool {
 // Ranking it up here would push the in-flight failovers down behind work
 // that has no deadline.
 func (r FailoverRow) NeedsDecision() bool {
-	return r.SplitBrain() || r.FenceFailed() || r.Role == store.RolePromoted ||
+	return r.SplitBrain() || r.SplitBrainPossible() || r.FenceFailed() ||
+		r.Role == store.RolePromoted ||
 		r.Role == store.RolePaused || r.PeerPromoted()
 }
 
@@ -1097,6 +1157,12 @@ type FailoverView struct {
 	// a pending operation blocks any other operation on the same VM, and an
 	// operator who does not know that reads the refusal as a bug.
 	Pending int
+	// SplitBrainPossibleCount is how many rows have the split-brain shape
+	// but a peer nobody has heard from recently enough to be sure. Counted
+	// separately from SplitBrainCount for the reason the dashboard gives:
+	// merging them cries wolf, dropping them claims silence as good news.
+	SplitBrainPossibleCount int
+
 	// SplitBrainCount is how many rows have both copies running. Counted
 	// here rather than in the template: a page that has to loop and tally to
 	// render its own headline is one where the headline can silently
@@ -1138,7 +1204,7 @@ func BuildFailoverView(
 	// different host's report entirely. Only live, non-revoked agents that
 	// have actually reported get in, which is what lets PeerSeen stand for
 	// "an enrolled agent exists for that host".
-	byRef := map[string]store.ReportDomain{}
+	byRef := map[string]peerState{}
 	live := 0
 	for _, a := range agents {
 		if a.Revoked {
@@ -1154,7 +1220,7 @@ func BuildFailoverView(
 			host = a.Hostname
 		}
 		for _, dom := range rep.Domains {
-			byRef[refKey(host, dom.Name)] = dom
+			byRef[refKey(host, dom.Name)] = peerState{dom: dom, reportedAt: rep.ReportedAtUnix}
 		}
 	}
 	v.NoAgents = live == 0
@@ -1249,7 +1315,9 @@ func BuildFailoverView(
 				row.PeerRef = pickPromotedTarget(dom.ReplicaTargets, byRef)
 			}
 			row.PeerHost, row.PeerVM = splitRef(row.PeerRef)
-			if peer, ok := byRef[refKey(row.PeerHost, row.PeerVM)]; ok {
+			row.PeerReportAgeSeconds = -1
+			if ps, ok := byRef[refKey(row.PeerHost, row.PeerVM)]; ok {
+				peer := ps.dom
 				row.PeerSeen = true
 				row.PeerRole = peer.Role
 				row.PeerActive = peer.Active
@@ -1259,9 +1327,15 @@ func BuildFailoverView(
 				row.PeerLastPromotedAt = peer.LastPromotedAt
 				row.PeerLastPromotedAtUnix = peer.LastPromotedAtUnix
 				row.PeerIsReplica = peer.ReplicaSource != ""
+				if ps.reportedAt > 0 {
+					row.PeerReportAgeSeconds = int64(now.Sub(time.Unix(ps.reportedAt, 0)).Seconds())
+				}
 			}
 
 			row.rank = rankRow(row)
+			if row.SplitBrainPossible() {
+				v.SplitBrainPossibleCount++
+			}
 			if row.SplitBrain() {
 				v.SplitBrainCount++
 			}
@@ -1358,6 +1432,12 @@ const operationsShown = 50
 // rankRow orders by how much attention a row wants.
 func rankRow(r FailoverRow) int {
 	switch {
+	case r.SplitBrainPossible():
+		// Ranked with the certain case rather than below it. What is
+		// uncertain here is only whether the second copy is STILL running;
+		// that it was promoted while this one was live is not in doubt, and
+		// the silence that makes it uncertain is itself the symptom.
+		return 0
 	case r.SplitBrain(), r.FenceFailed():
 		// Two live copies of one VM, diverging from the moment the second
 		// started. Nothing else on this page outranks it.
@@ -1383,6 +1463,19 @@ func rankRow(r FailoverRow) int {
 	}
 }
 
+// peerState is one domain as another host last reported it, with WHEN that
+// report arrived.
+//
+// The timestamp travels with the domain rather than in a second map keyed
+// the same way, because freshness is half of every question this page asks
+// about a peer: "the peer is running" and "the peer was running when we
+// last heard, which was before the partition" are different answers, and
+// the page used to give the first when it only knew the second.
+type peerState struct {
+	dom        store.ReportDomain
+	reportedAt int64
+}
+
 // pickPromotedTarget chooses which of a source's targets a row is about.
 //
 // Three tiers, in this order:
@@ -1401,16 +1494,17 @@ func rankRow(r FailoverRow) int {
 //     peer.
 //
 // The single-target case reached tier 3 and worked by luck. A fan-out did not.
-func pickPromotedTarget(targets []string, byRef map[string]store.ReportDomain) string {
+func pickPromotedTarget(targets []string, byRef map[string]peerState) string {
 	for _, t := range targets {
 		h, vm := splitRef(t)
-		if peer, ok := byRef[refKey(h, vm)]; ok && peer.Role == store.RolePromoted {
+		if ps, ok := byRef[refKey(h, vm)]; ok && ps.dom.Role == store.RolePromoted {
 			return t
 		}
 	}
 	for _, t := range targets {
 		h, vm := splitRef(t)
-		peer, ok := byRef[refKey(h, vm)]
+		ps, ok := byRef[refKey(h, vm)]
+		peer := ps.dom
 		if !ok || peer.LastPromotedAt == "" {
 			continue
 		}

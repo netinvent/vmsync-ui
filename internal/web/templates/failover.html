@@ -13,6 +13,11 @@
         {{$v.SplitBrainCount}} running in two places — two live copies diverge from the moment the second starts.
       </span>
     {{end}}
+    {{if $v.SplitBrainPossibleCount}}
+      <span class="note">
+        {{$v.SplitBrainPossibleCount}} possibly running in two places — a copy was promoted while this one was live, and the other host has not reported recently enough to say whether it still is. Silence is not good news here: it is what a partition looks like from this side.
+      </span>
+    {{end}}
     {{if $v.FenceFailedCount}}
       <span class="note">
         {{$v.FenceFailedCount}} where a fence was attempted and did not stop the VM. Nothing will retry it.

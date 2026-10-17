@@ -61,7 +61,7 @@ func fullFixture() ([]store.Agent, map[string]store.Report, map[string][]store.S
 	}
 	reports := map[string]store.Report{
 		"src": {
-			Hostname: "hyper01p",
+			Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30,
 			Domains: []store.ReportDomain{
 				// Scheduled, and one target: the form hides the target-host field.
 				{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok", Active: true},
@@ -77,7 +77,7 @@ func fullFixture() ([]store.Agent, map[string]store.Report, map[string][]store.S
 			},
 		},
 		"tgt": {
-			Hostname: "hyper02p",
+			Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30,
 			Domains: []store.ReportDomain{
 				{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 300},
 				// Carries a recorded verification failure as well as a
@@ -150,7 +150,7 @@ func TestDashboardSurfacesWhatMatters(t *testing.T) {
 	s := testServer(t)
 	agents := []store.Agent{{ID: "a1", Hostname: "hyper01p", LastSeenAt: now.Unix()}}
 	reports := map[string]store.Report{"a1": {
-		Hostname: "hyper01p",
+		Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30,
 		Domains: []store.ReportDomain{
 			{Name: "web01", ReplicaSource: "hyper00p:web01", Status: "critical", AgeSeconds: -1,
 				Reasons: []string{"no successful sync has ever completed"}},
@@ -203,11 +203,11 @@ func TestDashboardFlagsAReplicaKnownNotToMatchItsSource(t *testing.T) {
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
 			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok"},
 		}},
-		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			// Current by every measure this page had before: an ok status,
 			// two minutes behind, no failed attempts -- and wrong.
 			{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "ok", AgeSeconds: 120,
@@ -284,11 +284,11 @@ func TestDashboardFlagsAReplicaLeftHalfWrittenByAnInterruptedRebuild(t *testing.
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
 			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok"},
 		}},
-		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			// Healthy by every column this page has: ok, two minutes
 			// behind, no failed attempts, a checkpoint -- and its disks are
 			// a partial copy.
@@ -386,10 +386,10 @@ func TestDashboardStillWarnsWhenThePartialCopyValueCannotBeRead(t *testing.T) {
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
 		}},
-		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "ok", AgeSeconds: 120,
 				ReplicaIncomplete: raw},
 		}},
@@ -440,11 +440,11 @@ func dashboardPartialCopyFixture(raw string) ([]store.Agent, map[string]store.Re
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", ReplicaTargets: []string{"hyper02p:db01"}, Status: "ok"},
 			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok"},
 		}},
-		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", ReplicaSource: "hyper01p:db01", Status: "ok", AgeSeconds: 120,
 				LastCheckpoint: "vmsync-1758441000", ReplicaIncomplete: raw},
 			{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 120},
@@ -573,10 +573,10 @@ func TestBuildDashboardPairsComeFromTheTarget(t *testing.T) {
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "web01", ReplicaTargets: []string{"hyper02p:web01"}, Status: "ok"},
 		}},
-		"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 120, FailureCount: 0},
 		}},
 	}
@@ -599,7 +599,7 @@ func TestBuildDashboardPairsComeFromTheTarget(t *testing.T) {
 
 func TestBuildDashboardFlagsHostsWithNoAgent(t *testing.T) {
 	agents := []store.Agent{{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Unix()}}
-	reports := map[string]store.Report{"tgt": {Hostname: "hyper02p", Domains: []store.ReportDomain{
+	reports := map[string]store.Report{"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 		{Name: "web01", ReplicaSource: "hyper01p:web01", Status: "ok", AgeSeconds: 60},
 	}}}
 
@@ -681,7 +681,7 @@ func TestBuildDashboardMissingTargetShowsAnUnknownPeer(t *testing.T) {
 	// misconfiguration, and the host-level blind-spot line cannot point at
 	// which source is affected.
 	agents := []store.Agent{{ID: "src", Hostname: "hyper01p", LastSeenAt: now.Unix()}}
-	reports := map[string]store.Report{"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+	reports := map[string]store.Report{"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 		{Name: "haproxy01p.domain.local", ReplicaTargets: []string{"hyper02p:haproxy01p.domain.local"}, Status: "ok"},
 	}}}
 
@@ -725,7 +725,7 @@ func TestBuildDashboardMissingTargetNotesAStalePeer(t *testing.T) {
 		{ID: "tgt", Hostname: "hyper02p", LastSeenAt: now.Add(-time.Hour).Unix()},
 	}
 	reports := map[string]store.Report{
-		"src": {Hostname: "hyper01p", Domains: []store.ReportDomain{
+		"src": {Hostname: "hyper01p", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "haproxy01p.domain.local", ReplicaTargets: []string{"hyper02p:haproxy01p.domain.local"}, Status: "ok"},
 		}},
 		"tgt": {Hostname: "hyper02p", ReportedAtUnix: now.Add(-time.Hour).Unix(), Domains: []store.ReportDomain{
@@ -836,7 +836,7 @@ func TestBuildDashboardSortsWorstFirst(t *testing.T) {
 	// An availability page is read to find what needs attention. Burying a
 	// critical pair below a page of healthy ones defeats the purpose.
 	agents := []store.Agent{{ID: "a1", Hostname: "h", LastSeenAt: now.Unix()}}
-	reports := map[string]store.Report{"a1": {Hostname: "h", Domains: []store.ReportDomain{
+	reports := map[string]store.Report{"a1": {Hostname: "h", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 		{Name: "ok1", ReplicaSource: "s:ok1", Status: "ok"},
 		{Name: "crit1", ReplicaSource: "s:crit1", Status: "critical"},
 		{Name: "warn1", ReplicaSource: "s:warn1", Status: "warning"},
@@ -981,7 +981,7 @@ func TestSplitBrainOutranksEveryStatus(t *testing.T) {
 			{Name: "web01", ReplicaTargets: []string{"dr:web01"}, Active: true},
 			{Name: "db01", ReplicaTargets: []string{"dr:db01"}, Active: true},
 		}},
-		"tgt": {Hostname: "dr", Domains: []store.ReportDomain{
+		"tgt": {Hostname: "dr", ReportedAtUnix: now.Unix() - 30, Domains: []store.ReportDomain{
 			{Name: "db01", ReplicaSource: "prod:db01", Status: "critical", AgeSeconds: -1},
 			{Name: "web01", ReplicaSource: "prod:web01", Role: "promoted", Active: true, Status: "promoted"},
 		}},
