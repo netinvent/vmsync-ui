@@ -1308,10 +1308,21 @@ func BuildFailoverView(
 			ov.State, ov.Terminal = "cancelled", true
 			ov.Detail = "cancelled by " + rec.CancelledBy
 		case rec.Result != nil:
-			ov.State, ov.Terminal = rec.Result.State, true
+			// Terminal from the RESULT, not from "a result exists". An
+			// agent reports "running" as soon as it starts, and marking
+			// that terminal both froze the row at "running" forever and
+			// counted an operation still in flight against the
+			// terminal-rows cap instead of the pending total.
+			ov.State, ov.Terminal = rec.Result.State, rec.Result.Terminal()
 			ov.Detail = rec.Result.Error
 			if ov.Detail == "" {
 				ov.Detail = lastLine(rec.Result.LogTail)
+			}
+			if !ov.Terminal {
+				if ov.Detail == "" {
+					ov.Detail = "underway on " + ov.Host + "; it will report its outcome when it finishes"
+				}
+				v.Pending++
 			}
 		case rec.Expired(now):
 			// Still published, deliberately: the agent has to see it, refuse

@@ -299,11 +299,30 @@ The lifecycle, and what each step protects against:
 2. It appears in that agent's config, moving the ETag, so a polling agent
    sees it within seconds.
 3. The agent executes it **exactly once ever**, against a durable ledger
-   that records intent before acting.
+   that records intent before acting. Because it records intent *first*, its
+   very next report says `running` — before there is any outcome.
 4. The result rides on every report the agent sends until this UI stops
    publishing the operation.
 5. The UI applies the consequences, records the result, and stops publishing
    — which is what tells the agent to forget it.
+
+**A `running` result is progress, not an outcome, and the difference is the
+whole of step 5.** Only a terminal state — `done`, `failed`, `refused`,
+`expired`, `unknown` — applies the consequences, closes the audit entry and
+ends publication. A `running` report is recorded so the console can show the
+operation is underway, and changes nothing else. Treating it as an outcome
+breaks six things at once: the operation is un-published, so the agent drops
+its ledger entry and its real outcome is lost on both sides; the later report
+is skipped as already processed, so the console shows the failover as
+`running` for ever; the consequences in the next section never run, which is
+the silent half; the audit entry closes with "running" as its verdict; the
+one-in-flight gate below opens while the work is still going; and the row is
+counted as history, so it can be hidden by the display cap.
+
+A state this console does not recognise counts as an outcome. That direction
+is deliberate: a state mistaken for progress keeps the operation published
+for ever and holds the in-flight gate shut against every later operation for
+that VM, which is worse than closing one out without its consequences.
 
 **Only one operation per VM may be in flight.** Two promotions of one
 domain, or a promote racing an invert, is not a state anyone should be able

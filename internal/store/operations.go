@@ -136,12 +136,45 @@ const (
 	// which one ran -- they destroy different amounts of the target.
 	OpForceClean = "force-clean"
 
+	// OpStateRunning is the one state that is PROGRESS rather than an
+	// outcome, and the only one of these the agent sends while it still
+	// holds the operation.
+	//
+	// It was the one agent state missing from this list, which is how a
+	// report meaning "I have started" came to be recorded as "I have
+	// finished". The agent writes it in operationLedger.Begin -- before the
+	// work, deliberately, so a crash cannot lose the fact that a failover
+	// was attempted -- and attaches it to every report until the operation
+	// ends. A promote or a restore takes long enough that this is the
+	// ordinary case, not a rare one.
+	OpStateRunning = "running"
+
 	OpStateDone    = "done"
 	OpStateFailed  = "failed"
 	OpStateExpired = "expired"
 	OpStateRefused = "refused"
 	OpStateUnknown = "unknown"
 )
+
+// Terminal reports whether this result is an OUTCOME rather than progress.
+//
+// Everything except OpStateRunning counts as an outcome, INCLUDING a state
+// this build has never heard of, and that direction is deliberate rather
+// than lazy. A state mistaken for progress keeps the operation published
+// forever, keeps the agent re-sending it, and keeps the one-in-flight gate
+// shut against every later operation for that VM. A state mistaken for an
+// outcome costs one follow-up. Wedging a VM is the worse failure, so the
+// unknown case resolves towards closing the operation out -- which is also
+// exactly what this build did with every state before "running" was
+// understood here.
+//
+// OpStateUnknown is an outcome too, and not a contradiction: it is the
+// agent's considered report that it died mid-operation and cannot say what
+// happened, which is a final answer needing a person, not a progress
+// update.
+func (r OperationResult) Terminal() bool {
+	return r.State != OpStateRunning
+}
 
 // Replication roles, as vmsync writes them into a domain's own metadata and
 // the agent reports them back.
@@ -199,13 +232,31 @@ type OperationRecord struct {
 // Pending reports whether this operation should still be published to its
 // agent.
 //
-// A result of any kind ends publication -- that is what acknowledges it to
-// the agent, which drops its own ledger record in turn. Cancelling ends it
-// too. Expiry deliberately does NOT: the agent must still see it, refuse it
-// and report that refusal, so the audit entry closes with a reason instead
-// of hanging as "pending" forever.
+// A TERMINAL result ends publication -- that is what acknowledges it to the
+// agent, which drops its own ledger record in turn. A non-terminal one does
+// not, and the difference is load-bearing: an agent reports "running" as
+// soon as it starts, and un-publishing on that told the agent its outcome
+// had been received before it had one. Both sides then discarded it -- the
+// UI by skipping the later report, the agent by forgetting the operation it
+// was no longer being told about.
+//
+// Cancelling ends publication too. Expiry deliberately does NOT: the agent
+// must still see it, refuse it and report that refusal, so the audit entry
+// closes with a reason instead of hanging as "pending" forever.
 func (r OperationRecord) Pending() bool {
-	return r.Result == nil && r.CancelledAtUnix == 0
+	if r.CancelledAtUnix != 0 {
+		return false
+	}
+	return r.Result == nil || !r.Result.Terminal()
+}
+
+// Started reports whether the agent has picked this operation up.
+//
+// Distinct from !Pending(): an operation reported as running is both
+// started and still pending, and the two questions have different answers
+// for it. Cancelling asks this one.
+func (r OperationRecord) Started() bool {
+	return r.Result != nil
 }
 
 // Expired reports whether the deadline has passed, for display.
@@ -228,7 +279,51 @@ func (s *Store) loadOperations() (map[string]OperationRecord, error) {
 	if ops == nil {
 		ops = map[string]OperationRecord{}
 	}
+	for id, rec := range ops {
+		if normalised, changed := healStuckProgressRecord(rec); changed {
+			ops[id] = normalised
+		}
+	}
 	return ops, nil
+}
+
+// healStuckProgressRecord repairs a record left inconsistent by a build that
+// treated a progress report as an outcome.
+//
+// THE REASON THIS IS NOT COSMETIC. A non-terminal result makes an operation
+// Pending() again, which re-publishes it to its agent -- and the agent,
+// having been told by the old build that its result was received, dropped
+// its own ledger entry. A record left at "running" by the old build would
+// therefore be delivered to an agent with no memory of it, inside the
+// fifteen minutes OperationTTL allows, and a forced promote would run a
+// second time BECAUSE the UI was upgraded.
+//
+// `running` together with FollowUpDone is a combination this build cannot
+// write: FollowUpDone is set only for a terminal result. So it identifies
+// old data exactly, with no version stamp to keep in step.
+//
+// Normalised to OpStateUnknown because that is the honest answer and it is
+// already this system's word for it -- the outcome was discarded when it
+// arrived, so what happened on that hypervisor is now something only an
+// inspection establishes. Terminal, so the operation stays acknowledged and
+// is never re-delivered; visible, so somebody is told rather than finding a
+// promotion silently stuck at "running".
+//
+// In memory only, deliberately. loadOperations is on every read path, and a
+// read that writes would need the write lock and could fail a page load
+// over a repair. The normalisation is idempotent, so it simply re-applies
+// until some ordinary write persists it.
+func healStuckProgressRecord(rec OperationRecord) (OperationRecord, bool) {
+	if rec.Result == nil || rec.Result.Terminal() || !rec.FollowUpDone {
+		return rec, false
+	}
+	healed := *rec.Result
+	healed.State = OpStateUnknown
+	if healed.Error == "" {
+		healed.Error = "this operation was recorded as started but its outcome was never kept; what it did is unknown and needs checking on the host"
+	}
+	rec.Result = &healed
+	return rec, true
 }
 
 // Operations returns every record, newest first.
@@ -317,11 +412,23 @@ func (s *Store) CancelOperation(id, by string, now time.Time) error {
 	if !ok {
 		return fmt.Errorf("no such operation %s", id)
 	}
+	// Started, not !Pending(). A cancel withdraws an instruction the agent
+	// has not acted on yet; once it has reported anything at all -- an
+	// outcome, or "running" -- the work is underway or over on a hypervisor
+	// and no amount of UI state changes that.
+	//
+	// The distinction matters now that a running operation stays pending.
+	// Reading Pending() here would make a cancel appear to succeed against
+	// a promotion already in progress, and the record would then carry both
+	// a cancellation and that promotion's outcome.
+	if rec.Started() {
+		if rec.Result.Terminal() {
+			return fmt.Errorf("operation %s has already reported and cannot be cancelled", id)
+		}
+		return fmt.Errorf("operation %s is already running on %s and cannot be cancelled; it will report its outcome when it finishes", id, rec.VM)
+	}
 	if !rec.Pending() {
-		// Already reported. Saying so beats pretending the cancel worked:
-		// the operation has happened on a hypervisor and no amount of UI
-		// state changes that.
-		return fmt.Errorf("operation %s has already reported and cannot be cancelled", id)
+		return fmt.Errorf("operation %s is no longer pending and cannot be cancelled", id)
 	}
 	rec.CancelledAtUnix = now.Unix()
 	rec.CancelledBy = by
@@ -385,22 +492,42 @@ func (s *Store) RecordOperationResults(agentID string, results []OperationResult
 			// failover.
 			continue
 		}
+		// Already fully processed.
+		//
+		// FollowUpDone is what makes this sufficient, and it is sufficient
+		// only because it is set nowhere except under res.Terminal() below.
+		// That gives the invariant FollowUpDone => the stored result is an
+		// outcome, so this skips exactly the records that are finished with.
+		// It is also why a stored "running" no longer stops the outcome
+		// being recorded when it arrives: nothing set the flag.
+		//
+		// Anything that ever sets FollowUpDone elsewhere breaks that
+		// invariant and reintroduces the bug this comment describes;
+		// healStuckProgressRecord repairs the records the previous build
+		// left behind that way.
 		if rec.Result != nil && rec.FollowUpDone {
-			continue // already fully processed
+			continue
 		}
 
-		if !rec.FollowUpDone {
-			if err := s.applyOperationFollowUp(rec, res); err != nil {
-				return fmt.Errorf("apply the consequences of operation %s: %w", res.ID, err)
+		// The consequences, and the audit entry, belong to an OUTCOME.
+		// Doing either on a progress report is what made the whole record
+		// look closed: FollowUpDone was set although applyOperationFollowUp
+		// had returned early with nothing to do, and the audit entry closed
+		// with "running" as its outcome.
+		if res.Terminal() {
+			if !rec.FollowUpDone {
+				if err := s.applyOperationFollowUp(rec, res); err != nil {
+					return fmt.Errorf("apply the consequences of operation %s: %w", res.ID, err)
+				}
+				rec.FollowUpDone = true
 			}
-			rec.FollowUpDone = true
 		}
 		r := res
 		rec.Result = &r
 		ops[res.ID] = rec
 		changed = true
 
-		if rec.AuditID != "" {
+		if res.Terminal() && rec.AuditID != "" {
 			outcome := res.State
 			if res.Error != "" {
 				outcome = res.State + ": " + res.Error
