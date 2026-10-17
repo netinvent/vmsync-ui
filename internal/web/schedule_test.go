@@ -917,3 +917,100 @@ func TestAnAgentThatNeverStatedItsModeIsNotTreatedAsReadOnly(t *testing.T) {
 		t.Errorf("Unscheduled = %d, want 1: an unstated mode must not silently excuse a VM from needing a schedule", view.Unscheduled)
 	}
 }
+
+// THE WARNING MUST NOT PRE-EMPT THE OUTCOME.
+//
+// A verification interval shorter than the sync interval is worth telling
+// an operator about -- it resolves to "every sync" -- but it is not a
+// reason to refuse. It used to be sent as its own redirect, which wrote the
+// status and Location before the entry had been validated or stored, so
+// everything after it was discarded in silence. The operator read "Saved,
+// but ..." while the entry may never have been written.
+func TestAShortVerifyIntervalIsSavedAndReportedInOneAnswer(t *testing.T) {
+	s := testServer(t)
+	if _, err := s.Store.AppendAudit("setup", "noop", "", ""); err != nil {
+		t.Fatalf("store not writable: %v", err)
+	}
+
+	rec := post(t, s, "/schedule/save", url.Values{
+		"agent_id":                {"agent-1"},
+		"vm":                      {"web01"},
+		"interval_minutes":        {"30"},
+		"verify_interval_minutes": {"5"}, // shorter than the sync interval
+		"preset":                  {"wan"},
+		"verify":                  {"full"},
+		"target_disk_path":        {"/data/replicas"},
+		"target_host":             {"hyper02p"},
+		"enabled":                 {"on"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("save returned %d, want 303; body: %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+
+	// THE ENTRY IS ACTUALLY THERE. This is the half the old code could not
+	// promise: it answered before trying.
+	cfg, _, err := s.Store.AgentConfigFor("agent-1")
+	if err != nil {
+		t.Fatalf("AgentConfigFor: %v", err)
+	}
+	if len(cfg.Schedule) != 1 {
+		t.Fatalf("agent config carries %d entries, want the saved one -- the console reported an outcome it had not reached yet", len(cfg.Schedule))
+	}
+	if got := cfg.Schedule[0].VerifyIntervalSeconds; got != 300 {
+		t.Errorf("verify_interval_seconds = %d, want 300", got)
+	}
+
+	// ...and the operator is told both things, in one message, as a flash
+	// rather than an error: nothing was refused.
+	if strings.Contains(loc, "error=") {
+		t.Errorf("the warning was reported as an error, though the entry was saved: %s", loc)
+	}
+	for _, want := range []string{"Saved", "every+sync+will+verify"} {
+		if !strings.Contains(loc, want) {
+			t.Errorf("redirect %s does not carry %q", loc, want)
+		}
+	}
+}
+
+// The counterpart: a change that is genuinely refused must not be reported
+// as saved, and must leave nothing behind.
+func TestARefusedScheduleChangeIsNotReportedAsSaved(t *testing.T) {
+	s := testServer(t)
+	if _, err := s.Store.AppendAudit("setup", "noop", "", ""); err != nil {
+		t.Fatalf("store not writable: %v", err)
+	}
+
+	// A short verify interval -- which used to answer "Saved, but ..."
+	// immediately -- together with a shutdown timeout the store refuses.
+	rec := post(t, s, "/schedule/save", url.Values{
+		"agent_id":                {"agent-1"},
+		"vm":                      {"web01"},
+		"interval_minutes":        {"30"},
+		"verify_interval_minutes": {"5"},
+		"shutdown_timeout_sec":    {"-5"},
+		"preset":                  {"wan"},
+		"verify":                  {"full"},
+		"target_disk_path":        {"/data/replicas"},
+		"target_host":             {"hyper02p"},
+		"enabled":                 {"on"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("save returned %d, want 303; body: %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+
+	if !strings.Contains(loc, "error=") {
+		t.Errorf("a refused change did not redirect with an error: %s", loc)
+	}
+	if strings.Contains(loc, "Saved") {
+		t.Errorf("a refused change was reported as saved: %s -- the operator would believe the VM's cadence had changed when it had not", loc)
+	}
+	cfg, _, err := s.Store.AgentConfigFor("agent-1")
+	if err != nil {
+		t.Fatalf("AgentConfigFor: %v", err)
+	}
+	if len(cfg.Schedule) != 0 {
+		t.Errorf("a refused change wrote %d schedule entries", len(cfg.Schedule))
+	}
+}

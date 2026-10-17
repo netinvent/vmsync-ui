@@ -35,6 +35,7 @@ import (
 
 	"vmsync-ui/internal/auth"
 	"vmsync-ui/internal/store"
+	"vmsync-ui/internal/version"
 )
 
 //go:embed templates/*.html static/* static/fonts/*
@@ -53,6 +54,12 @@ type Server struct {
 func New(st *store.Store, am *auth.Manager, log *slog.Logger, secure bool, grafana string) (*Server, error) {
 	tpl, err := template.New("").Funcs(template.FuncMap{
 		"statusClass": statusClass,
+		// A function rather than a field on every page's data struct.
+		// The footer is a shared {{define}} block that receives no data of
+		// its own, and threading a version through eight view types to
+		// reach it would mean eight chances to forget one -- on exactly
+		// the page somebody happens to be looking at.
+		"uiVersion": func() string { return version.Version },
 	}).ParseFS(assets, "templates/*.html")
 	if err != nil {
 		return nil, err
@@ -343,6 +350,10 @@ func (s *Server) postScheduleSave(w http.ResponseWriter, r *http.Request, user a
 	// means no verify -- but silence there is a property of the executor, not
 	// a reason for the console to accept a request it cannot honour.
 	verifyMinutes := 0
+	// Anything worth telling the operator that is NOT a reason to refuse.
+	// Folded into the final redirect, so one answer goes out and it is the
+	// one that reflects what actually happened.
+	note := ""
 	if raw := strings.TrimSpace(r.FormValue("verify_interval_minutes")); raw != "" {
 		verifyMinutes, err = strconv.Atoi(raw)
 		if err != nil || verifyMinutes < 1 || verifyMinutes > 10080 {
@@ -357,7 +368,17 @@ func (s *Server) postScheduleSave(w http.ResponseWriter, r *http.Request, user a
 			// Not an error -- it resolves to "every sync", which is a
 			// coherent thing to want -- but it is almost always a mistake,
 			// and the resolution is invisible without being told.
-			s.redirectSchedule(w, r, "", fmt.Sprintf("Saved, but the verification interval (%dm) is shorter than the sync interval (%dm), so every sync will verify.", verifyMinutes, minutes))
+			//
+			// COLLECTED, NOT SENT. Redirecting here wrote the status and
+			// the Location before the entry had been validated or stored,
+			// and every later write was then discarded in silence: the
+			// shutdown-timeout parse, the cadence check, the audit append
+			// and SetScheduleEntry could each fail and redirect into a
+			// flushed header. The operator read "Saved, but ..." for a
+			// change that was never written, and the actual refusal went
+			// nowhere -- so the VM kept its old cadence, or stayed
+			// unscheduled, while the console said otherwise.
+			note = fmt.Sprintf(" The verification interval (%dm) is shorter than the sync interval (%dm), so every sync will verify.", verifyMinutes, minutes)
 		}
 	}
 
@@ -431,7 +452,7 @@ func (s *Server) postScheduleSave(w http.ResponseWriter, r *http.Request, user a
 	_ = s.Store.CompleteAudit(entryID, "saved")
 	s.Log.Info("schedule entry saved", "actor", user.Username, "vm", vm, "interval_m", minutes, "preset", presetName, "enabled", entry.Enabled)
 
-	s.redirectSchedule(w, r, "Saved. The agent picks this up on its next poll, usually within seconds.", "")
+	s.redirectSchedule(w, r, "Saved. The agent picks this up on its next poll, usually within seconds."+note, "")
 }
 
 func (s *Server) postScheduleDelete(w http.ResponseWriter, r *http.Request, user auth.User) {
