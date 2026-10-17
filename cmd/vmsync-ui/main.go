@@ -44,6 +44,7 @@ import (
 	"vmsync-ui/internal/api"
 	"vmsync-ui/internal/auth"
 	"vmsync-ui/internal/store"
+	"vmsync-ui/internal/version"
 	"vmsync-ui/internal/web"
 )
 
@@ -75,8 +76,16 @@ func main() {
 		configPath   = flag.String("config", "/etc/vmsync-ui/vmsync-ui.conf", "Path to the configuration file")
 		hashPassword = flag.Bool("hash-password", false, "Read a password from stdin and print its hash for the config file, then exit")
 		debug        = flag.Bool("debug", false, "Enable debug logging")
+		showVersion  = flag.Bool("version", false, "Print the version and exit")
 	)
 	flag.Parse()
+	// Before the argument check and before anything is read from disk: a
+	// version is the one question that must be answerable on a host whose
+	// configuration is broken, which is usually when somebody asks it.
+	if *showVersion {
+		fmt.Println(version.Version)
+		return
+	}
 	if flag.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "vmsync-ui: unexpected argument(s) %v\n", flag.Args())
 		os.Exit(2)
@@ -95,6 +104,11 @@ func main() {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	// Logged at startup, as vmsync and vmsync-agent do, so the journal of a
+	// host says which console was running at a given moment. The footer
+	// answers the same question for whoever is looking at a page right now;
+	// this answers it for whoever is reading logs afterwards.
+	log.Info("vmsync-ui starting", "version", version.Version, "config", *configPath)
 
 	if err := run(*configPath, log); err != nil {
 		log.Error("vmsync-ui stopped", "error", err)

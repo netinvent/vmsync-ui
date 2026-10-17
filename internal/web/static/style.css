@@ -380,6 +380,16 @@ footer.foot {
   color: var(--muted);
 }
 
+/* The build actually serving this page. Quiet, but selectable: the usual
+   reason to want it is to paste it into a bug report or compare it with an
+   agent's version on the agents page. */
+footer.foot .ver {
+  display: block;
+  margin-top: 0.4rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
 /* --- schedule page ------------------------------------------------------ */
 
 label.cell {
