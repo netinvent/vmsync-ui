@@ -286,6 +286,39 @@ func (s *Server) postScheduleSave(w http.ResponseWriter, r *http.Request, user a
 		return
 	}
 
+	// A REVOKED AGENT CANNOT BE GIVEN WORK, checked here and not only in the
+	// view that renders it.
+	//
+	// BuildScheduleView already skips revoked agents, so without this the
+	// save succeeded, the operator was told "the agent picks this up on its
+	// next poll, usually within seconds", and the row was simply absent when
+	// they reloaded -- while store.Authenticate answers a revoked agent as
+	// not-found, so that poll never comes. They are left believing a VM is
+	// scheduled when it is scheduled nowhere, and nothing on any page says
+	// otherwise. The entry also outlives the mistake: re-enrolling the host
+	// mints a fresh agent id, so nothing ever inherits or cleans it up.
+	//
+	// The reachable case is a schedule tab left open across a revocation --
+	// the same window the failover page documents for itself -- and that path
+	// is guarded twice over, by store.agentIDForHostLocked and by
+	// refuseIneligible rebuilding the view. This one had nothing.
+	//
+	// Deliberately only REVOKED, not "unknown". An id matching no agent at
+	// all cannot be produced by this page, which offers only enrolled agents,
+	// and refusing it would change a behaviour the preset-resolution test
+	// relies on without closing anything an operator can reach.
+	agents, err := s.Store.Agents()
+	if err != nil {
+		s.redirectSchedule(w, r, "", "Could not re-read the fleet's state to confirm that agent is still enrolled, so nothing was saved.")
+		return
+	}
+	for _, a := range agents {
+		if a.ID == agentID && a.Revoked {
+			s.redirectSchedule(w, r, "", "The agent on "+a.Hostname+" has been revoked, so it can no longer poll and would never run this schedule. Nothing was saved. Enrol that host again and set the schedule on its new agent.")
+			return
+		}
+	}
+
 	presetName := r.FormValue("preset")
 	profile, ok := store.PresetByName(presetName)
 	if !ok {

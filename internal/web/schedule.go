@@ -356,7 +356,12 @@ type RunView struct {
 	// Rendered distinctly from ok, because an unqualified green tick is how
 	// that stayed invisible.
 	Degraded bool
-	Detail   string
+	// Withdrawn marks a run read out of a revoked agent's frozen report.
+	// The run itself is history and is not in question; what the mark says
+	// is that nothing will ever follow it, so this row is not evidence about
+	// the fleet as it stands now.
+	Withdrawn bool
+	Detail    string
 	// StartedAtUnix is what the list is ordered by. The humanised When is
 	// for reading only — sorting on it would order "10m ago" before
 	// "2m ago", which is the wrong way round and quietly so.
@@ -366,6 +371,19 @@ type RunView struct {
 // BuildRunView flattens every agent's recent sync results, newest first.
 func BuildRunView(agents []store.Agent, reports map[string]store.Report, now time.Time, limit int) []RunView {
 	var out []RunView
+	// Revoked agents stay, deliberately, for the reason failover.go gives
+	// about its own hostByAgent map: the run happened on that host whatever
+	// this console's relationship with it is now, and a history that quietly
+	// drops entries is worse than one that includes a host you remember
+	// withdrawing.
+	//
+	// What they lose is the unqualified pill. This panel is read as "did the
+	// last few syncs work", and a revoked agent's report is frozen at the
+	// instant it was cut off, so its newest run stays newest and keeps its
+	// green tick for as long as the record survives -- indefinitely on a
+	// quiet estate. Marking it is the same answer the pairs table above
+	// gives for a withdrawn end: keep the row, withdraw its right to look
+	// current.
 	for _, a := range agents {
 		rep, ok := reports[a.ID]
 		if !ok {
@@ -377,15 +395,19 @@ func BuildRunView(agents []store.Agent, reports map[string]store.Report, now tim
 		}
 		for _, r := range rep.Syncs {
 			rv := RunView{
-				Host:          host,
-				VM:            r.VM,
-				TargetHost:    r.TargetHost,
-				When:          humanAge(now.Sub(time.Unix(r.StartedAtUnix, 0))) + " ago",
-				Duration:      humanAge(time.Duration(r.DurationSecs) * time.Second),
-				OK:            r.Succeeded(),
-				Unknown:       r.Unobserved(),
-				Busy:          r.Outcome == store.OutcomeBusy,
-				Degraded:      r.Degraded,
+				Host:       host,
+				VM:         r.VM,
+				TargetHost: r.TargetHost,
+				When:       humanAge(now.Sub(time.Unix(r.StartedAtUnix, 0))) + " ago",
+				Duration:   humanAge(time.Duration(r.DurationSecs) * time.Second),
+				OK:         r.Succeeded(),
+				Unknown:    r.Unobserved(),
+				Busy:       r.Outcome == store.OutcomeBusy,
+				Degraded:   r.Degraded,
+				// Not about this run, which happened and ended however it
+				// ended, but about the report carrying it: that host cannot
+				// report again, so this row will never be superseded.
+				Withdrawn:     a.Revoked,
 				StartedAtUnix: r.StartedAtUnix,
 			}
 			switch {

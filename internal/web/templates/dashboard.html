@@ -177,9 +177,24 @@
                  that are no longer there. Without this pill nothing on the
                  board distinguishes it from a pair that is genuinely fine. */}}
             {{if .ReplicaPartial}}<span class="pill s-crit">partial copy</span>{{end}}
+            {{/* A fourth pill, and the same principle as the two above: never
+                 instead of the status, because the status is still the last
+                 thing that host said. An agent that has been revoked cannot
+                 report again, so every figure on this row is frozen at the
+                 moment it was cut off and will stay that way. Without this
+                 the row ages into looking merely stale, which is the wrong
+                 diagnosis for a host somebody deliberately withdrew. */}}
+            {{if .Withdrawn}}<span class="pill s-crit">withdrawn host</span>{{end}}
           </td>
           <td class="mono">{{.SourceHost}}:{{.SourceVM}}
             {{if not .SourceSeen}}<div class="warnline">no agent reporting this source</div>{{end}}
+            {{if .Withdrawn}}
+              <div class="warnline">
+                the agent on <strong>{{.WithdrawnEnd}}</strong> has been revoked, so everything on this
+                row is what it last reported and nothing here will change again — the replica and
+                anything running on it are unaffected, and still need dealing with
+              </div>
+            {{end}}
             {{/* Repeated on the source cell because that is the end a repair
                  is driven from: a resync runs on the source, and the source's
                  own metadata has no idea the copy it wrote died half way. */}}
@@ -277,9 +292,17 @@
                  unobserved and have left a guest frozen -- so folding it in
                  would force a choice between two facts that are both true. */}}
             {{if .Degraded}}<span class="pill s-crit">needs attention</span>{{end}}
+            {{/* A third pill, and like the second it is orthogonal rather than
+                 a rung: the run ended however it ended. What this says is that
+                 the host reporting it has been revoked, so nothing will ever
+                 follow this row and it is not evidence about the fleet as it
+                 stands now. Warn rather than crit -- the history is sound, it
+                 is only its currency that is gone. */}}
+            {{if .Withdrawn}}<span class="pill s-warn">withdrawn host</span>{{end}}
           </td>
           <td class="mono">{{.Host}}:{{.VM}}
             {{if .Detail}}<div class="warnline">{{.Detail}}</div>{{end}}
+            {{if .Withdrawn}}<div class="warnline">this agent has been revoked — the run is history, and no later one will appear here</div>{{end}}
           </td>
           <td class="mono">{{if .TargetHost}}{{.TargetHost}}{{else}}—{{end}}</td>
           <td class="num">{{.When}}</td>

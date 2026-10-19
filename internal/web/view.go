@@ -91,6 +91,20 @@ type Pair struct {
 	// SourceActive is the source domain's runtime state as its own agent
 	// reported it, meaningful only when SourceSeen.
 	SourceActive bool
+	// SourceWithdrawn and TargetWithdrawn mark an end whose agent has been
+	// revoked. The report behind it is frozen at the moment this console cut
+	// that host off and can never be replaced, so every figure on this row
+	// taken from it -- the status, the age, the checkpoint -- describes a
+	// moment in the past and will go on describing it.
+	//
+	// Kept as a mark on the row rather than as a reason to drop the row,
+	// because revocation is a fact about this console and not about the
+	// host: the replica is still on disk, a promoted copy is still running,
+	// an interrupted rebuild is still half-written. Dropping the row takes
+	// all of those off the board with it.
+	SourceWithdrawn bool
+	TargetWithdrawn bool
+
 	// SourceReportAgeSeconds is how old the report SourceActive came from
 	// is, or -1 when the source was never reported at all.
 	//
@@ -115,6 +129,25 @@ type Pair struct {
 // flag the replica, because the one thing worse than an unexplained marker
 // is a silent absence of one.
 func (p Pair) VerifyFailed() bool { return p.VerifyState != "" }
+
+// Withdrawn reports whether either end of this pair was last described by an
+// agent that has since been revoked, so no figure on the row can be current.
+func (p Pair) Withdrawn() bool { return p.SourceWithdrawn || p.TargetWithdrawn }
+
+// WithdrawnEnd names the host, or hosts, this console no longer hears from,
+// so the warning can say which half of the row stopped being observed rather
+// than leaving the operator to work it out.
+func (p Pair) WithdrawnEnd() string {
+	switch {
+	case p.SourceWithdrawn && p.TargetWithdrawn:
+		return p.SourceHost + " and " + p.TargetHost
+	case p.TargetWithdrawn:
+		return p.TargetHost
+	case p.SourceWithdrawn:
+		return p.SourceHost
+	}
+	return ""
+}
 
 // VerifyFailedAt renders when the mismatch was found, or "" when the agent
 // reported a verdict without a date.
@@ -314,7 +347,7 @@ type Dashboard struct {
 	// for a target under the same VM name: the pair proves the copy exists,
 	// so the spelling difference is not a missing copy.
 	MissingTargets []MissingTarget
-	GeneratedAt   string
+	GeneratedAt    string
 }
 
 type Unprotected struct {
@@ -364,6 +397,10 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 		// reportedAt is when the report this came from was received. Carried
 		// so a consumer can tell a current observation from a frozen one.
 		reportedAt int64
+		// revoked marks a report whose agent has been cut off, so it can
+		// never be replaced. Carried for the same reason reportedAt is, one
+		// step further on: this one can never become current again.
+		revoked bool
 	}
 	byRef := map[string]located{}
 	hostsWithAgents := map[string]bool{}
@@ -372,6 +409,31 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 	// than gone.
 	hostFresh := map[string]bool{}
 
+	// A REVOKED AGENT'S REPORT IS LAST-KNOWN, NOT CURRENT -- and that is a
+	// property of the data, not a reason to drop it.
+	//
+	// Revoking keeps the agent record on purpose, so an audit entry can still
+	// resolve an ID to a hostname, and it keeps the last report; the agent can
+	// no longer authenticate, so nothing will ever replace that report. The
+	// defect is rendering the frozen snapshot as PROTECTION: LastSeenAt is by
+	// definition recent at the instant of revocation, so the host read as
+	// fresh and its pairs read as green.
+	//
+	// Dropping the agent here instead was tried, and it is worse. Everything
+	// the board says about a host comes through this index, and only some of
+	// it is a claim about protection. Excluding a revoked agent also silenced
+	// the split-brain banner whenever either running end was the revoked one,
+	// made PeerKnown false so the page blamed a hostname typo for a host this
+	// console had itself withdrawn, turned a live promoted replica into a row
+	// saying the VM has no copy, and took the retired host's unprotected VMs,
+	// verify failures and partial copies off the board with it. Revocation
+	// touches none of those: cutting a host off stops this console hearing
+	// from it, it does not stop a VM running.
+	//
+	// So the host stays, and the staleness is carried -- the same answer
+	// SourceReportAgeSeconds already gives for a report whose host died.
+	// What revocation withdraws is only the right to look CURRENT: hostFresh
+	// is withheld below, and every row built from such a report is marked.
 	for _, a := range agents {
 		rep, ok := reports[a.ID]
 		if !ok {
@@ -383,11 +445,23 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 		}
 		key := strings.ToLower(host)
 		hostsWithAgents[key] = true
-		if a.LastSeenAt > 0 && now.Sub(time.Unix(a.LastSeenAt, 0)) <= staleAfter {
+		// Withheld for a revoked agent whatever its clock says. It cannot
+		// report again, so "reported for recently" is not something that can
+		// become true of it -- and at the moment of revocation its LastSeenAt
+		// is as recent as any live agent's.
+		if !a.Revoked && a.LastSeenAt > 0 && now.Sub(time.Unix(a.LastSeenAt, 0)) <= staleAfter {
 			hostFresh[key] = true
 		}
 		for _, dom := range rep.Domains {
-			byRef[strings.ToLower(host+":"+dom.Name)] = located{host: host, domain: dom, reportedAt: rep.ReportedAtUnix}
+			k := strings.ToLower(host + ":" + dom.Name)
+			// A live agent's view of a domain outranks a revoked one's,
+			// whichever order the two arrive in. That is the re-enrolment
+			// case: the withdrawn record and the new agent's briefly coexist
+			// under one hostname, and the new one is the observation.
+			if prev, clash := byRef[k]; clash && !prev.revoked && a.Revoked {
+				continue
+			}
+			byRef[k] = located{host: host, domain: dom, reportedAt: rep.ReportedAtUnix, revoked: a.Revoked}
 		}
 	}
 
@@ -409,12 +483,12 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 
 		for _, dom := range rep.Domains {
 			switch {
-		case dom.ReplicaSource != "":
-			srcHost, srcVM := splitRef(dom.ReplicaSource)
-			if srcHost != "" {
-				referencedHosts[strings.ToLower(srcHost)] = true
-			}
-			src, seen := byRef[strings.ToLower(dom.ReplicaSource)]
+			case dom.ReplicaSource != "":
+				srcHost, srcVM := splitRef(dom.ReplicaSource)
+				if srcHost != "" {
+					referencedHosts[strings.ToLower(srcHost)] = true
+				}
+				src, seen := byRef[strings.ToLower(dom.ReplicaSource)]
 				p := Pair{
 					SourceHost:     srcHost,
 					SourceVM:       srcVM,
@@ -429,6 +503,14 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					TargetActive:   dom.Active,
 					SourceSeen:     seen,
 					SourceActive:   seen && src.domain.Active,
+
+					// Which ends of this row were last described by an agent
+					// that has since been revoked. The row is still real --
+					// the replica is on disk, and so is whatever hazard it
+					// carries -- but nothing on it is current, and the pill
+					// the template draws from these is what says so.
+					TargetWithdrawn: a.Revoked,
+					SourceWithdrawn: seen && src.revoked,
 
 					// Taken from the target's own report, which is where
 					// vmsync writes the verdict. Nothing derives it: the
@@ -458,37 +540,37 @@ func BuildDashboard(agents []store.Agent, reports map[string]store.Report, now t
 					d.SplitBrainPossible = append(d.SplitBrainPossible, p)
 				}
 
-		case len(dom.ReplicaTargets) > 0:
-			// A source. Its pairs are rendered from the target side; all
-			// that is recorded here is which hosts it points at, so a
-			// target host with no agent shows up as a blind spot.
-			for _, ref := range dom.ReplicaTargets {
-				tgtHost, tgtVM := splitRef(ref)
-				if tgtHost == "" {
-					// A bare VM name with no host half. Nothing can resolve
-					// it to a peer report, so there is no absence to report.
-					continue
+			case len(dom.ReplicaTargets) > 0:
+				// A source. Its pairs are rendered from the target side; all
+				// that is recorded here is which hosts it points at, so a
+				// target host with no agent shows up as a blind spot.
+				for _, ref := range dom.ReplicaTargets {
+					tgtHost, tgtVM := splitRef(ref)
+					if tgtHost == "" {
+						// A bare VM name with no host half. Nothing can resolve
+						// it to a peer report, so there is no absence to report.
+						continue
+					}
+					referencedHosts[strings.ToLower(tgtHost)] = true
+					// The replica this source names is in no agent's report. Kept
+					// as a candidate for now: whether it is reported below depends
+					// on the pairs, which are still being built. Matching is
+					// deliberately exact (case-insensitive only): resolving a
+					// short name against an FQDN report would hide the
+					// misconfiguration instead of showing it.
+					if _, ok := byRef[strings.ToLower(tgtHost+":"+tgtVM)]; !ok {
+						peer := strings.ToLower(tgtHost)
+						known := hostsWithAgents[peer]
+						missingCandidates = append(missingCandidates, MissingTarget{
+							SourceHost: host,
+							SourceVM:   dom.Name,
+							TargetHost: tgtHost,
+							TargetVM:   tgtVM,
+							PeerKnown:  known,
+							PeerStale:  known && !hostFresh[peer],
+						})
+					}
 				}
-			referencedHosts[strings.ToLower(tgtHost)] = true
-			// The replica this source names is in no agent's report. Kept
-			// as a candidate for now: whether it is reported below depends
-			// on the pairs, which are still being built. Matching is
-			// deliberately exact (case-insensitive only): resolving a
-			// short name against an FQDN report would hide the
-			// misconfiguration instead of showing it.
-			if _, ok := byRef[strings.ToLower(tgtHost+":"+tgtVM)]; !ok {
-				peer := strings.ToLower(tgtHost)
-				known := hostsWithAgents[peer]
-				missingCandidates = append(missingCandidates, MissingTarget{
-					SourceHost: host,
-					SourceVM:   dom.Name,
-					TargetHost: tgtHost,
-					TargetVM:   tgtVM,
-					PeerKnown:  known,
-					PeerStale:  known && !hostFresh[peer],
-				})
-			}
-			}
 
 			default:
 				if dom.Status == "unreplicated" {
